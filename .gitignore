@@ -1,0 +1,14 @@
+# all rust related git ignores
+**/*.rs.bk
+**/target/
+**/Cargo.lock
+**/Cargo.toml.bk
+**/Cargo.toml.orig
+
+# IDE specific ignores
+.vscode/
+.idea/
+*.iml
+
+# MacOS specific ignores
+.DS_Store

@@ -1,0 +1,11 @@
+{
+  "id": "todoapisample",
+  "version": "latest",
+  "entry": "todoapisample.so",
+  "routes": [
+    {
+      "path": "/todos",
+      "method": "GET"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "fezz-sdk",
+  "fezz-macros",
+  "hhrf",
+  "todoapisample",
+]
