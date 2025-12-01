@@ -40,10 +40,14 @@ async fn main() {
 async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
     // 1) fezz.json oku
     let manifest_path = format!("{root}/functions/{id}/fezz.json");
+    println!("[HHRF] Loading manifest: {}", manifest_path);
     let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
     let manifest: FezzManifest = serde_json::from_str(&manifest_str).unwrap();
+    println!("[HHRF] Manifest loaded: id={}, version={}, entry={}", manifest.id, manifest.version, manifest.entry);
 
     let so_path = format!("{root}/functions/{id}/{}", manifest.entry);
+    println!("[HHRF] Loading .so: {}", so_path);
+
 
     // 2) .so load et
     let lib = unsafe { Library::new(&so_path).unwrap() };
@@ -51,8 +55,8 @@ async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
 
     // 3) Demo için sabit bir FezzHttpRequest oluştur (/todos GET)
     let req = FezzHttpRequest {
-        method: "GET".into(),
-        path: "/todos".into(),
+        method: manifest.routes[0].method.clone(),
+        path: manifest.routes[0].path.clone(),
         headers: vec![],
         body: None,
     };

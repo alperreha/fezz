@@ -6,7 +6,7 @@ use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
 pub fn proxy_todos(_req: FezzHttpRequest) -> FezzHttpResponse {
     let client = reqwest::blocking::Client::new();
     let res = client
-        .get("https://jsonplaceholder.typicode.com/todos")
+        .get("https://jsonplaceholder.typicode.com/todos/1")
         .send()
         .unwrap();
 
