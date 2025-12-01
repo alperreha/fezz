@@ -74,19 +74,9 @@ impl Route {
         path: impl Into<String>,
         function_id: impl Into<String>,
     ) -> Self {
-        let method = match &method.into() {
-            m @ RouteMethod::Get => *m,
-            m @ RouteMethod::Post => *m,
-            m @ RouteMethod::Put => *m,
-            m @ RouteMethod::Delete => *m,
-            m @ RouteMethod::Patch => *m,
-            m @ RouteMethod::Head => *m,
-            m @ RouteMethod::Options => *m,
-            m @ RouteMethod::Any => *m,
-        };
         Self {
             path: path.into(),
-            method,
+            method: method.into(),
             function_id: function_id.into(),
             priority: 0,
             enabled: true,

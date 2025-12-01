@@ -64,31 +64,43 @@ impl FezzFunctionAttrs {
                         "id" => {
                             if let Lit::Str(lit_str) = lit {
                                 attrs.id = Some(lit_str.value());
+                            } else {
+                                return Err(syn::Error::new_spanned(&nv.value, "id must be a string literal"));
                             }
                         }
                         "version" => {
                             if let Lit::Str(lit_str) = lit {
                                 attrs.version = Some(lit_str.value());
+                            } else {
+                                return Err(syn::Error::new_spanned(&nv.value, "version must be a string literal"));
                             }
                         }
                         "method" => {
                             if let Lit::Str(lit_str) = lit {
                                 attrs.method = Some(lit_str.value());
+                            } else {
+                                return Err(syn::Error::new_spanned(&nv.value, "method must be a string literal"));
                             }
                         }
                         "path" => {
                             if let Lit::Str(lit_str) = lit {
                                 attrs.path = Some(lit_str.value());
+                            } else {
+                                return Err(syn::Error::new_spanned(&nv.value, "path must be a string literal"));
                             }
                         }
                         "timeout" => {
                             if let Lit::Int(lit_int) = lit {
                                 attrs.timeout = Some(lit_int.base10_parse()?);
+                            } else {
+                                return Err(syn::Error::new_spanned(&nv.value, "timeout must be an integer literal"));
                             }
                         }
                         "description" => {
                             if let Lit::Str(lit_str) = lit {
                                 attrs.description = Some(lit_str.value());
+                            } else {
+                                return Err(syn::Error::new_spanned(&nv.value, "description must be a string literal"));
                             }
                         }
                         _ => {
