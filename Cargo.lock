@@ -105,6 +105,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "fezz-macro",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -114,6 +115,15 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fezz-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

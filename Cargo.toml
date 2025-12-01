@@ -5,6 +5,9 @@ edition = "2021"
 description = "A Rust-based Host HTTP Runtime (HHRF) for lightweight fetch-like Fezz function modules"
 license = "MIT"
 
+[workspace]
+members = [".", "fezz-macro"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
@@ -16,6 +19,7 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = { version = "1", features = ["serde"] }
+fezz-macro = { path = "fezz-macro" }
 
 [dev-dependencies]
 tokio-test = "0.4"
