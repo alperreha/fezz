@@ -205,8 +205,15 @@ async fn convert_request(
 
 /// Build a hyper Response from FezzResponse.
 fn build_response(fezz_response: FezzResponse) -> Response<Full<Bytes>> {
-    let mut builder = Response::builder()
-        .status(hyper::StatusCode::from_u16(fezz_response.status.0).unwrap_or(hyper::StatusCode::OK));
+    let status = hyper::StatusCode::from_u16(fezz_response.status.0).unwrap_or_else(|_| {
+        warn!(
+            "Invalid status code {}, falling back to 500 Internal Server Error",
+            fezz_response.status.0
+        );
+        hyper::StatusCode::INTERNAL_SERVER_ERROR
+    });
+
+    let mut builder = Response::builder().status(status);
 
     for (name, value) in fezz_response.headers {
         builder = builder.header(name, value);

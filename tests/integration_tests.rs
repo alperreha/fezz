@@ -152,7 +152,7 @@ async fn test_fezz_error_conversion() {
     let error = FezzError::not_found("Item not found");
     let response: FezzResponse = error.into();
     
-    assert_eq!(response.status.0, 404);
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

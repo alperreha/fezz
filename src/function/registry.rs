@@ -73,7 +73,7 @@ impl FunctionRegistry {
             )));
         }
 
-        let mut context = FunctionContext::new(&name, "");
+        let mut context = FunctionContext::new(&name, "registration");
         for (k, v) in &self.global_env {
             context.env.insert(k.clone(), v.clone());
         }
