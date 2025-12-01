@@ -30,6 +30,82 @@ impl FezzFunction for TestFunction {
     }
 }
 
+// Test the macro-generated function
+#[fezz_function(
+    id = "macro-hello",
+    version = "v1",
+    method = "GET",
+    path = "/api/hello"
+)]
+async fn macro_hello(
+    _req: FezzRequest,
+    _ctx: &FunctionContext,
+) -> Result<FezzResponse, FezzError> {
+    Ok(FezzResponse::text("Hello from macro!"))
+}
+
+// Test macro with custom timeout
+#[fezz_function(
+    id = "macro-timeout",
+    version = "v2",
+    method = "POST",
+    path = "/api/submit",
+    timeout = 60,
+    description = "A function with custom timeout"
+)]
+async fn macro_timeout(
+    req: FezzRequest,
+    _ctx: &FunctionContext,
+) -> Result<FezzResponse, FezzError> {
+    let body = req.text().unwrap_or_default();
+    Ok(FezzResponse::text(format!("Received: {}", body)))
+}
+
+#[tokio::test]
+async fn test_macro_function_creation() {
+    // Test that macro creates the struct
+    let func = MacroHelloFunction::new();
+    assert_eq!(func.name(), "macro-hello");
+}
+
+#[tokio::test]
+async fn test_macro_function_manifest() {
+    // Test that macro creates the manifest
+    let manifest = MacroHelloFunction::manifest();
+    assert_eq!(manifest.id, "macro-hello");
+    assert_eq!(manifest.version, "v1");
+    assert_eq!(manifest.method, "GET");
+    assert_eq!(manifest.path, "/api/hello");
+    assert_eq!(manifest.timeout, 30); // default timeout
+}
+
+#[tokio::test]
+async fn test_macro_function_manifest_with_timeout() {
+    let manifest = MacroTimeoutFunction::manifest();
+    assert_eq!(manifest.id, "macro-timeout");
+    assert_eq!(manifest.version, "v2");
+    assert_eq!(manifest.method, "POST");
+    assert_eq!(manifest.path, "/api/submit");
+    assert_eq!(manifest.timeout, 60);
+    assert_eq!(manifest.description, "A function with custom timeout");
+}
+
+#[tokio::test]
+async fn test_macro_function_execution() {
+    let registry = FunctionRegistry::new();
+    
+    registry
+        .register("macro-hello", Box::new(MacroHelloFunction::new()))
+        .await
+        .unwrap();
+    
+    let request = FezzRequest::new(Method::Get, "/api/hello");
+    let response = registry.execute("macro-hello", request, "req-123").await.unwrap();
+    
+    assert!(response.status.is_success());
+    assert_eq!(response.text_body(), Some("Hello from macro!".to_string()));
+}
+
 #[tokio::test]
 async fn test_function_registry_register() {
     let registry = FunctionRegistry::new();

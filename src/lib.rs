@@ -61,6 +61,24 @@
 //! }
 //! ```
 //!
+//! ## Macro-based Function Definition
+//!
+//! You can also use the `#[fezz_function]` macro for a more ergonomic API:
+//!
+//! ```ignore
+//! use fezz::prelude::*;
+//!
+//! #[fezz_function(
+//!     id = "hello-world",
+//!     version = "v1",
+//!     method = "GET",
+//!     path = "/api/hello"
+//! )]
+//! async fn hello(req: FezzRequest, ctx: &FunctionContext) -> Result<FezzResponse, FezzError> {
+//!     Ok(FezzResponse::text("Hello, World!"))
+//! }
+//! ```
+//!
 //! ## Function Lifecycle
 //!
 //! Fezz functions follow a load-run-unload execution model:
@@ -79,21 +97,26 @@
 //!
 //! Configure Envoy to forward requests to the HHRF server's address (default: `0.0.0.0:8080`).
 
+pub mod control_plane;
 pub mod function;
 pub mod http;
 pub mod runtime;
 
+/// Re-export the procedural macro.
+pub use fezz_macro::fezz_function;
+
 /// Re-export commonly used types.
 pub mod prelude {
-    pub use crate::function::{FezzFunction, FunctionContext, FunctionRegistry};
+    pub use crate::function::{FezzFunction, FunctionContext, FunctionManifest, FunctionRegistry, OwnedFunctionManifest};
     pub use crate::function::handler::FezzError;
     pub use crate::http::{FezzRequest, FezzResponse, Method, StatusCode};
     pub use crate::runtime::{HhrfConfig, HhrfServer};
     pub use async_trait::async_trait;
+    pub use crate::fezz_function;
 }
 
 // Re-export for convenience
-pub use function::{FezzFunction, FunctionContext, FunctionRegistry};
+pub use function::{FezzFunction, FunctionContext, FunctionManifest, FunctionRegistry, OwnedFunctionManifest};
 pub use function::handler::FezzError;
 pub use http::{FezzRequest, FezzResponse};
 pub use runtime::{HhrfConfig, HhrfServer};
