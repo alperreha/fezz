@@ -23,12 +23,12 @@ type FezzFetchFn = unsafe extern "C" fn(*const c_char) -> *mut c_char;
 
 #[tokio::main]
 async fn main() {
-    // HHRF_ROOT env’den gelsin
+    // HHRF_ROOT env'den gelsin
     let root = std::env::var("HHRF_ROOT").unwrap_or_else(|_| "./HHRF_ROOT".into());
     let shared_root = Arc::new(root);
 
     let app = Router::new()
-        .route("/rpc/latest/:id", get({
+        .route("/rpc/:id", get({
             let root = shared_root.clone();
             move |Path(id): Path<String>| handle_rpc(root.clone(), id)
         }));
@@ -38,20 +38,26 @@ async fn main() {
 }
 
 async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
+    let start_time = std::time::Instant::now();
+
     // 1) fezz.json oku
     let manifest_path = format!("{root}/functions/{id}/fezz.json");
     println!("[HHRF] Loading manifest: {}", manifest_path);
     let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
     let manifest: FezzManifest = serde_json::from_str(&manifest_str).unwrap();
     println!("[HHRF] Manifest loaded: id={}, version={}, entry={}", manifest.id, manifest.version, manifest.entry);
+    let manifest_load_time = start_time.elapsed();
+    println!("[HHRF] Manifest load time: {:?}", manifest_load_time);
 
     let so_path = format!("{root}/functions/{id}/{}", manifest.entry);
     println!("[HHRF] Loading .so: {}", so_path);
 
-
     // 2) .so load et
+    let lib_load_start = std::time::Instant::now();
     let lib = unsafe { Library::new(&so_path).unwrap() };
     let fezz_fetch: Symbol<FezzFetchFn> = unsafe { lib.get(b"fezz_fetch").unwrap() };
+    let lib_load_time = lib_load_start.elapsed();
+    println!("[HHRF] Library load time: {:?}", lib_load_time);
 
     // 3) Demo için sabit bir FezzHttpRequest oluştur (/todos GET)
     let req = FezzHttpRequest {
@@ -65,7 +71,10 @@ async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
     let c_req = CString::new(req_json).unwrap();
 
     // 4) fezz_fetch çağır
+    let fetch_start = std::time::Instant::now();
     let raw_ptr = unsafe { fezz_fetch(c_req.as_ptr()) };
+    let fetch_time = fetch_start.elapsed();
+    println!("[HHRF] fezz_fetch execution time: {:?}", fetch_time);
 
     // 5) C char* → String
     let c_str = unsafe { CStr::from_ptr(raw_ptr) };
@@ -75,7 +84,7 @@ async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
 
     let fezz_resp: FezzHttpResponse = serde_json::from_str(&resp_str).unwrap();
 
-    // 6) HTTP response’a çevir
+    // 6) HTTP response'a çevir
     let mut http_resp = axum::response::Response::builder()
         .status(fezz_resp.status);
 
@@ -84,5 +93,9 @@ async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
     }
 
     let body = fezz_resp.body.unwrap_or_default();
+
+    let total_time = start_time.elapsed();
+    println!("[HHRF] Total request time for '{}': {:?}", id, total_time);
+
     http_resp.body(axum::body::Body::from(body)).unwrap()
 }

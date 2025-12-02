@@ -3,5 +3,6 @@ members = [
   "fezz-sdk",
   "fezz-macros",
   "hhrf",
-  "todoapisample",
+  "example_todosapi",
+  "example_redis",
 ]

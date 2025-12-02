@@ -7,26 +7,27 @@ A single Rust-based Host HTTP Runtime (HHRF) runs lightweight “fetch-like” F
 1. Build sampletodoapisample function
 
 ```bash
-cargo build -p todoapisample --release
+cargo build -p example_todosapi --release
 ```
 
 2. Copy the generated shared library to functions folder
 
 ```bash
-# for todoapisample use same name as in fezz.json
-cp target/release/libtodoapisample.so ./functions/todoapisample/todoapisample.so
+# for todos@latest use same name as in fezz.json
+mkdir -p ./functions/todos@latest
+cp target/release/libexample_todosapi.dylib ./functions/todos@latest/libexample_todosapi.dylib
 ```
 
-3. Create fezz.json for new function in functions/todoapisample/fezz.json
+3. Create fezz.json for new function in functions/todos@latest/fezz.json
 
 ```json
 {
-  "id": "todoapisample",
+  "id": "todos",
   "version": "latest",
-  "entry": "todoapisample.so",
+  "entry": "libexample_todosapi.dylib",
   "routes": [
     {
-      "path": "/todos",
+      "path": "/hello",
       "method": "GET"
     }
   ]
@@ -42,5 +43,5 @@ cargo run -p hhrf
 5. Test the function
 
 ```bash
-curl http://127.0.0.1:3000/rpc/latest/todoapisample
+curl http://127.0.0.1:3000/rpc/todos@latest
 ```
