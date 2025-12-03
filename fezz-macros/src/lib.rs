@@ -14,11 +14,16 @@ pub fn fezz_function(_args: TokenStream, input: TokenStream) -> TokenStream {
         #func
 
         /// FFI entry point for the Fezz function.
-        /// 
+        ///
         /// # Safety
-        /// 
+        ///
         /// The caller must ensure that `req_json` is a valid pointer to a
         /// null-terminated C string containing valid UTF-8 JSON data.
+        ///
+        /// # Memory
+        ///
+        /// The returned pointer is allocated using `CString::into_raw()` and must be
+        /// freed by the caller using `CString::from_raw()`.
         #[no_mangle]
         pub unsafe extern "C" fn fezz_fetch(req_json: *const std::os::raw::c_char) -> *mut std::os::raw::c_char {
             use std::ffi::{CStr, CString};
@@ -67,11 +72,18 @@ pub fn fezz_function(_args: TokenStream, input: TokenStream) -> TokenStream {
 
             let resp_str = match serde_json::to_string(&resp) {
                 Ok(s) => s,
-                Err(_) => r#"{"status":500,"headers":[],"body":"{\"error\":\"Serialization failed\"}"}"#.to_string(),
+                Err(_) => {
+                    // Fallback: construct a valid FezzHttpResponse JSON manually
+                    // Headers are serialized as an array of [key, value] tuples
+                    r#"{"status":500,"headers":[["content-type","application/json"]],"body":"{\"error\":\"Serialization failed\"}"}"#.to_string()
+                }
             };
             let c_string = match CString::new(resp_str) {
                 Ok(s) => s,
-                Err(_) => CString::new(r#"{"status":500,"headers":[],"body":"{\"error\":\"CString creation failed\"}"}"#).unwrap(),
+                Err(_) => {
+                    // Fallback for CString creation failure
+                    CString::new(r#"{"status":500,"headers":[["content-type","application/json"]],"body":"{\"error\":\"CString creation failed\"}"}"#).unwrap()
+                }
             };
             c_string.into_raw()
         }
