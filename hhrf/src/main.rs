@@ -1,4 +1,10 @@
-use axum::{extract::Path, routing::get, Router};
+use axum::{
+    body::Bytes,
+    extract::Path,
+    http::{HeaderMap, Method},
+    routing::{delete, get, patch, post, put},
+    Router,
+};
 use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
 use libloading::{Library, Symbol};
 use serde::Deserialize;
@@ -30,14 +36,77 @@ async fn main() {
     let app = Router::new()
         .route("/rpc/:id", get({
             let root = shared_root.clone();
-            move |Path(id): Path<String>| handle_rpc(root.clone(), id)
+            move |Path(id): Path<String>, method: Method, headers: HeaderMap| {
+                handle_rpc(root.clone(), id, None, method, headers, None)
+            }
+        }))
+        .route("/rpc/:id", post({
+            let root = shared_root.clone();
+            move |Path(id): Path<String>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, None, method, headers, Some(body))
+            }
+        }))
+        .route("/rpc/:id", put({
+            let root = shared_root.clone();
+            move |Path(id): Path<String>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, None, method, headers, Some(body))
+            }
+        }))
+        .route("/rpc/:id", patch({
+            let root = shared_root.clone();
+            move |Path(id): Path<String>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, None, method, headers, Some(body))
+            }
+        }))
+        .route("/rpc/:id", delete({
+            let root = shared_root.clone();
+            move |Path(id): Path<String>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, None, method, headers, Some(body))
+            }
+        }))
+        .route("/rpc/:id/*rest", get({
+            let root = shared_root.clone();
+            move |Path((id, rest)): Path<(String, String)>, method: Method, headers: HeaderMap| {
+                handle_rpc(root.clone(), id, Some(rest), method, headers, None)
+            }
+        }))
+        .route("/rpc/:id/*rest", post({
+            let root = shared_root.clone();
+            move |Path((id, rest)): Path<(String, String)>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, Some(rest), method, headers, Some(body))
+            }
+        }))
+        .route("/rpc/:id/*rest", put({
+            let root = shared_root.clone();
+            move |Path((id, rest)): Path<(String, String)>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, Some(rest), method, headers, Some(body))
+            }
+        }))
+        .route("/rpc/:id/*rest", patch({
+            let root = shared_root.clone();
+            move |Path((id, rest)): Path<(String, String)>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, Some(rest), method, headers, Some(body))
+            }
+        }))
+        .route("/rpc/:id/*rest", delete({
+            let root = shared_root.clone();
+            move |Path((id, rest)): Path<(String, String)>, method: Method, headers: HeaderMap, body: Bytes| {
+                handle_rpc(root.clone(), id, Some(rest), method, headers, Some(body))
+            }
         }));
 
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
+async fn handle_rpc(
+    root: Arc<String>,
+    id: String,
+    rest_path: Option<String>,
+    method: Method,
+    headers: HeaderMap,
+    body: Option<Bytes>,
+) -> axum::response::Response {
     let start_time = std::time::Instant::now();
 
     // 1) fezz.json oku
@@ -48,7 +117,6 @@ async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
     println!("[HHRF] Manifest loaded: id={}, version={}, entry={}", manifest.id, manifest.version, manifest.entry);
     let manifest_load_time = start_time.elapsed();
     println!("[HHRF] Manifest load time: {:?}", manifest_load_time);
-
     let so_path = format!("{root}/functions/{id}/{}", manifest.entry);
     println!("[HHRF] Loading .so: {}", so_path);
 
@@ -59,24 +127,50 @@ async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
     let lib_load_time = lib_load_start.elapsed();
     println!("[HHRF] Library load time: {:?}", lib_load_time);
 
-    // 3) Demo için sabit bir FezzHttpRequest oluştur (/todos GET)
+    // debug log for id and rest_path
+    println!("[HHRF] Handling RPC for id='{}' with rest_path='{:?}'", id, rest_path);
+
+    // 3) Axum'dan gelen headers'ı Vec<(String, String)>'e çevir
+    let fezz_headers: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str().ok().map(|val| (k.as_str().to_string(), val.to_string()))
+        })
+        .collect();
+
+    // 4) Body'yi String'e çevir
+    let fezz_body: Option<String> = body.and_then(|b| {
+        if b.is_empty() {
+            None
+        } else {
+            String::from_utf8(b.to_vec()).ok()
+        }
+    });
+
+    // 5) FezzHttpRequest oluştur (gerçek method, headers, body ile)
     let req = FezzHttpRequest {
-        method: manifest.routes[0].method.clone(),
-        path: manifest.routes[0].path.clone(),
-        headers: vec![],
-        body: None,
+        method: method.as_str().to_string(),
+        path: match rest_path {
+            Some(p) => format!("/{}", p),
+            None => manifest.routes[0].path.clone(),
+        },
+        headers: fezz_headers,
+        body: fezz_body,
     };
+
+    println!("[HHRF] FezzHttpRequest: method={}, path={}, headers_count={}, has_body={}", 
+        req.method, req.path, req.headers.len(), req.body.is_some());
 
     let req_json = serde_json::to_string(&req).unwrap();
     let c_req = CString::new(req_json).unwrap();
 
-    // 4) fezz_fetch çağır
+    // 6) fezz_fetch çağır
     let fetch_start = std::time::Instant::now();
     let raw_ptr = unsafe { fezz_fetch(c_req.as_ptr()) };
     let fetch_time = fetch_start.elapsed();
     println!("[HHRF] fezz_fetch execution time: {:?}", fetch_time);
 
-    // 5) C char* → String
+    // 7) C char* → String
     let c_str = unsafe { CStr::from_ptr(raw_ptr) };
     let resp_str = c_str.to_str().unwrap().to_string();
 
@@ -84,7 +178,7 @@ async fn handle_rpc(root: Arc<String>, id: String) -> axum::response::Response {
 
     let fezz_resp: FezzHttpResponse = serde_json::from_str(&resp_str).unwrap();
 
-    // 6) HTTP response'a çevir
+    // 8) HTTP response'a çevir
     let mut http_resp = axum::response::Response::builder()
         .status(fezz_resp.status);
 
