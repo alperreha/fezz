@@ -2,6 +2,7 @@ use fezz_macros::fezz_function;
 use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
 use redis::Commands;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 #[derive(Serialize, Deserialize)]
 struct SetRequest {
@@ -21,8 +22,24 @@ struct RedisResponse {
     data: Option<String>,
 }
 
+/// Global Redis client using OnceLock for warm state persistence.
+/// The client is initialized once and reused across all requests
+/// for the lifetime of the cached library.
+static REDIS_CLIENT: OnceLock<redis::Client> = OnceLock::new();
+
+/// Gets or initializes the Redis client.
+/// Uses OnceLock to ensure the client is only created once.
+fn get_redis_client() -> Result<&'static redis::Client, redis::RedisError> {
+    // Initialize the client only once
+    let client = REDIS_CLIENT.get_or_init(|| {
+        redis::Client::open("redis://127.0.0.1:6379/")
+            .expect("Failed to create Redis client")
+    });
+    Ok(client)
+}
+
 fn get_redis_connection() -> Result<redis::Connection, redis::RedisError> {
-    let client = redis::Client::open("redis://127.0.0.1:6379/")?;
+    let client = get_redis_client()?;
     client.get_connection()
 }
 
@@ -32,7 +49,7 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
     let method = req.method.as_str();
 
     match (method, path) {
-        // POST /set - Redis'e key-value yaz
+        // POST /set - Write key-value to Redis
         ("POST", "/set") => {
             let body = match &req.body {
                 Some(b) => b,
@@ -81,9 +98,9 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
             }
         }
 
-        // GET /get?key=xxx veya POST /get ile body {"key": "xxx"}
+        // GET /get?key=xxx or POST /get with body {"key": "xxx"}
         ("GET", p) if p.starts_with("/get") => {
-            // Query string'den key al: /get?key=mykey
+            // Get key from query string: /get?key=mykey
             let key = p.split("key=")
                 .nth(1)
                 .map(|s| s.split('&').next().unwrap_or(s))
@@ -127,7 +144,7 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
             }
         }
 
-        // POST /get - Body'den key al
+        // POST /get - Get key from body
         ("POST", "/get") => {
             let body = match &req.body {
                 Some(b) => b,
@@ -181,7 +198,7 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
             }
         }
 
-        // DELETE /del - Key sil
+        // DELETE /del - Delete key
         ("DELETE", "/del") => {
             let body = match &req.body {
                 Some(b) => b,
@@ -235,7 +252,7 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
             }
         }
 
-        // Default: kullanım bilgisi
+        // Default: usage info
         _ => json_response(200, RedisResponse {
             success: true,
             message: "Redis Demo API - Endpoints: POST /set, GET /get?key=xxx, POST /get, DELETE /del".into(),

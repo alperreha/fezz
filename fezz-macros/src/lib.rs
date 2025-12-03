@@ -7,25 +7,72 @@ pub fn fezz_function(_args: TokenStream, input: TokenStream) -> TokenStream {
     let func = parse_macro_input!(input as ItemFn);
     let func_name = &func.sig.ident;
 
-    // fezz_fetch wrapper’ı generate et
+    // Generate fezz_fetch wrapper with panic safety
+    // The function is marked unsafe because it accepts a raw pointer that must
+    // be valid and point to a null-terminated C string.
     let expanded = quote! {
         #func
 
+        /// FFI entry point for the Fezz function.
+        /// 
+        /// # Safety
+        /// 
+        /// The caller must ensure that `req_json` is a valid pointer to a
+        /// null-terminated C string containing valid UTF-8 JSON data.
         #[no_mangle]
-        pub extern "C" fn fezz_fetch(req_json: *const std::os::raw::c_char) -> *mut std::os::raw::c_char {
+        pub unsafe extern "C" fn fezz_fetch(req_json: *const std::os::raw::c_char) -> *mut std::os::raw::c_char {
             use std::ffi::{CStr, CString};
             use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
 
-            // C char* -> String
-            let c_str = unsafe { CStr::from_ptr(req_json) };
-            let req_str = c_str.to_str().unwrap_or("{}");
-            let req: FezzHttpRequest = serde_json::from_str(req_str).unwrap();
+            // Wrap the entire function body in catch_unwind to prevent panics
+            // from crossing the FFI boundary (which is undefined behavior).
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // C char* -> String
+                let c_str = CStr::from_ptr(req_json);
+                let req_str = c_str.to_str().unwrap_or("{}");
+                let req: FezzHttpRequest = match serde_json::from_str(req_str) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return FezzHttpResponse {
+                            status: 400,
+                            headers: vec![("content-type".into(), "application/json".into())],
+                            body: Some(format!("{{\"error\":\"Invalid request: {}\"}}", e)),
+                        };
+                    }
+                };
 
-            // user function çağrısı
-            let resp: FezzHttpResponse = #func_name(req);
+                // Call user function
+                #func_name(req)
+            }));
 
-            let resp_str = serde_json::to_string(&resp).unwrap();
-            let c_string = CString::new(resp_str).unwrap();
+            let resp: FezzHttpResponse = match result {
+                Ok(r) => r,
+                Err(panic_info) => {
+                    // A panic occurred - return an error response instead of crashing
+                    let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic".to_string()
+                    };
+
+                    FezzHttpResponse {
+                        status: 500,
+                        headers: vec![("content-type".into(), "application/json".into())],
+                        body: Some(format!("{{\"error\":\"Function panicked: {}\"}}", panic_msg)),
+                    }
+                }
+            };
+
+            let resp_str = match serde_json::to_string(&resp) {
+                Ok(s) => s,
+                Err(_) => r#"{"status":500,"headers":[],"body":"{\"error\":\"Serialization failed\"}"}"#.to_string(),
+            };
+            let c_string = match CString::new(resp_str) {
+                Ok(s) => s,
+                Err(_) => CString::new(r#"{"status":500,"headers":[],"body":"{\"error\":\"CString creation failed\"}"}"#).unwrap(),
+            };
             c_string.into_raw()
         }
     };
