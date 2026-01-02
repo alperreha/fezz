@@ -4,72 +4,78 @@ A single Rust-based Host HTTP Runtime (HHRF) runs lightweight "fetch-like" Fezz 
 
 ## Architecture
 
-### Hot-Swappable Library Cache
+### Process-Based Execution (fezz-runner)
 
-HHRF maintains a global cache of loaded function libraries for high-concurrency performance. Instead of loading and unloading `.so` files for every request, libraries are cached and reused across requests.
+HHRF artık fonksiyonları aynı process içinde `libloading` ile çalıştırmak yerine, her çağrıyı ayrı bir **child process** üzerinden yürütür:
 
-- **Cache Hit**: Uses the existing `Arc<Library>` (nearly zero RAM cost due to OS code segment sharing)
-- **Cache Miss**: Loads the `.so` file, wraps in `Arc`, inserts into cache, then executes
-- **TTL Cleanup**: Background task evicts libraries idle for more than 5 minutes
+- HHRF, manifest'ten `.dylib`/`.so` yolunu okur.
+- `fezz-runner` binary'sini spawn eder ve `.dylib` yolunu argüman olarak geçirir.
+- HTTP isteğini `FezzHttpRequest` olarak JSON'a çevirip child process'in `stdin`'ine yazar.
+- Child process içindeki `fezz-runner`, ilgili library'yi yükler, `fezz_fetch` fonksiyonunu çağırır ve dönen `FezzHttpResponse` JSON'unu `stdout`'a yazar.
+- HHRF, `stdout`'tan bu JSON'u okuyup gerçek HTTP cevabına dönüştürür.
+
+Bu model sayesinde user kodu HHRF'den ayrı bir process olarak çalışır; panik / segfault HHRF'yi düşürmez ve ileride OS-level jailer ile izole etmek kolaylaşır.
+
+### Runner'ı Jail ile Sarmak
+
+HHRF, kullanacağı runner binary'sini `FEZZ_RUNNER` ortam değişkeni ile ayarlamana izin verir:
+
+- Varsayılan: `FEZZ_RUNNER` tanımlı değilse `fezz-runner` kullanılır.
+- Prod ortamda Linux üzerinde, `FEZZ_RUNNER`'ı bir jailer ile wrap edebilirsin (ör. `nsjail`, `firejail`, `bwrap`).
+
+Örnek (konsept):
+
+```bash
+export FEZZ_RUNNER=/usr/local/bin/nsjail-fezz-runner
+```
+
+`nsjail-fezz-runner` script/bin'i içinde:
+
+- Low-priv user'a geç,
+- Gerekirse chroot / namespace / seccomp ayarlarını yap,
+- Sonra gerçek `fezz-runner`'ı bu sandbox içinde çalıştır.
 
 ### Panic Safety
 
-The macro wrapper uses `std::panic::catch_unwind` to catch panics in user code, preventing them from crossing FFI boundaries (which would cause undefined behavior). Panics are converted to HTTP 500 error responses.
+`#[fezz_function]` macro'su, user fonksiyonunu `std::panic::catch_unwind` ile saran bir `fezz_fetch` FFI entrypoint'i üretir. Böylece user kodundaki panikler FFI boundary'yi geçmez, HTTP 500 dönen structured error response'a çevrilir.
 
 ### Async Runtime Isolation
 
-The exported C function (`fezz_fetch`) is synchronous. For async operations (HTTP requests, Redis, etc.), use blocking clients within your function. The host runs FFI calls in `spawn_blocking` to prevent blocking the async runtime.
+`fezz_fetch` exported C fonksiyonu senkron çalışır. Fonksiyon içinde HTTP/Redis gibi işler için bloklayan client'lar kullanılır. HHRF tarafında çağrı artık ayrı bir process olduğu için host async runtime'ı bloklanmaz; ek olarak process-level izolasyon kazanılır.
 
 ## Best Practices for User Functions
 
-### Warm State Persistence
+### State and Caching
 
-With the library caching mechanism, global variables persist between requests. Use `std::sync::OnceLock` for heavy clients:
+Artık her çağrı ayrı bir process içinde olsa bile (özellikle `fezz-runner` modeliyle), fonksiyon kütüphanesi birden çok kez reuse edilebilir. Ağır client'lar için yine `std::sync::OnceLock` gibi mekanizmaları kullanabilirsin, ancak unutmaman gereken nokta:
 
-```rust
-use std::sync::OnceLock;
-use redis::Client;
-
-static REDIS_CLIENT: OnceLock<Client> = OnceLock::new();
-
-fn get_redis_client() -> &'static Client {
-    REDIS_CLIENT.get_or_init(|| {
-        Client::open("redis://127.0.0.1:6379/").expect("Failed to create Redis client")
-    })
-}
-
-#[fezz_function]
-pub fn my_function(req: FezzHttpRequest) -> FezzHttpResponse {
-    let client = get_redis_client();
-    // Use the client - it will be reused across requests
-    // ...
-}
-```
+- Process crash ederse (panic, segfault), sonraki çağrı yeni bir process ile sıfırdan başlar.
+- Bu nedenle state'i sadece performans için kullan, **doğruluk için değil**.
 
 ### Guidelines
 
-1. **Use blocking clients**: Since the FFI boundary is synchronous, use blocking versions of HTTP/database clients
-2. **Initialize once**: Use `OnceLock` for expensive resources like connection pools
-3. **Handle errors gracefully**: Don't panic - return proper error responses instead
-4. **Keep functions stateless**: Don't rely on mutable global state between requests
+1. **Blocking client kullan**: FFI interface senkron olduğu için HTTP/DB için bloklayan client'lar en sade yol.
+2. **Panik yerine hata döndür**: Panik etmek yerine `FezzHttpResponse` ile düzgün hata mesajları dön.
+3. **Stateless tasarla**: İş mantığını her request bağımsız olacak şekilde yaz; global mutable state'e güvenme.
+4. **Timeout'ları düşün**: Dış servis çağrılarına makul timeout'lar koy; child process askıda kalmasın.
 
 ## Demo
 
-1. Build sample function
+### 1. Build sample function and runner
 
 ```bash
-cargo build -p example_todosapi --release
+cargo build --release -p example_todosapi -p fezz-runner -p hhrf
 ```
 
-2. Copy the generated shared library to functions folder
+### 2. Fonksiyon kütüphanesini functions klasörüne koy
 
 ```bash
-# for todos@latest use same name as in fezz.json
+# todos@latest için fezz.json'daki isimle eşleşmeli
 mkdir -p ./functions/todos@latest
 cp target/release/libexample_todosapi.dylib ./functions/todos@latest/libexample_todosapi.dylib
 ```
 
-3. Create fezz.json for new function in functions/todos@latest/fezz.json
+`functions/todos@latest/fezz.json` örneği (repo'da zaten var, sadece referans için):
 
 ```json
 {
@@ -85,13 +91,22 @@ cp target/release/libexample_todosapi.dylib ./functions/todos@latest/libexample_
 }
 ```
 
-4. Run HHRF server
+### 3. (Opsiyonel) Runner'ı override et
+
+Varsayılan olarak HHRF, `fezz-runner` binary'sini kullanır. Eğer kendi jailer'ını eklemek istiyorsan:
 
 ```bash
-cargo run -p hhrf
+export FEZZ_RUNNER=fezz-runner   # veya kendi wrapper'ının path'i
 ```
 
-5. Test the function
+### 4. HHRF server'ını çalıştır
+
+```bash
+export HHRF_ROOT=.
+cargo run -p hhrf --release
+```
+
+### 5. Fonksiyonu test et
 
 ```bash
 curl http://127.0.0.1:3000/rpc/todos@latest
