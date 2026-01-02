@@ -6,16 +6,14 @@ use axum::{
 };
 use fezz_sdk::{ByteBuf, FezzWireHeader, FezzWireRequest, FezzWireResponse};
 use http_body_util::BodyExt;
+use libloading::{Library, Symbol};
 use serde::Deserialize;
 use std::{
+    path::Path as FsPath,
     sync::Arc,
     time::Instant,
 };
-use tokio::{
-    net::TcpListener,
-    process::Command,
-};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::net::TcpListener;
 
 #[derive(Deserialize)]
 struct FezzManifest {
@@ -178,56 +176,53 @@ async fn handle_rpc(
     http_resp.body(axum::body::Body::from(body)).unwrap()
 }
 
-/// Execute a Fezz function as an external process via the fezz-runner helper.
+/// Execute a Fezz function in-process via libloading.
 ///
 /// `so_path` is the path to the dynamic library containing `fezz_handle_v2`.
-/// `req_bytes` is the FezzWireRequest bytes to send on stdin.
+/// `req_bytes` is the FezzWireRequest bytes passed to the plugin.
 async fn execute_in_process(so_path: &str, req_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    // Allow overriding runner binary via env, so users can wrap it in a jailer
-    // like nsjail / firejail / bwrap on Linux.
-    let runner = std::env::var("FEZZ_RUNNER").unwrap_or_else(|_| "fezz-runner".to_string());
-
-    println!("[HHRF] Spawning runner '{}' for {}", runner, so_path);
-
-    let mut child = Command::new(&runner)
-        .arg(so_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn runner '{}': {}", runner, e))?;
-
-    // Write request bytes to stdin
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(req_bytes)
-            .await
-            .map_err(|e| format!("Failed to write to runner stdin: {}", e))?;
-    } else {
-        return Err("Runner stdin not available".to_string());
+    if !FsPath::new(so_path).exists() {
+        return Err(format!("Library not found at {}", so_path));
     }
 
-    // Read response bytes from stdout
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Runner stdout not available".to_string())?;
+    let req_bytes = req_bytes.to_vec();
 
-    let mut buf = Vec::new();
-    stdout
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("Failed to read runner stdout: {}", e))?;
+    tokio::task::spawn_blocking(move || unsafe {
+        type FezzHandleV2Fn = unsafe extern "C" fn(fezz_sdk::FezzSlice) -> fezz_sdk::FezzOwned;
+        type FezzFreeV2Fn = unsafe extern "C" fn(fezz_sdk::FezzOwned);
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("Failed to wait for runner: {}", e))?;
+        let library = Library::new(&so_path)
+            .map_err(|e| format!("Failed to load library '{}': {}", so_path, e))?;
 
-    if !status.success() {
-        return Err(format!("Runner exited with status {}", status));
-    }
+        let fezz_handle_v2: Symbol<FezzHandleV2Fn> = library
+            .get(b"fezz_handle_v2")
+            .map_err(|e| format!("Failed to resolve fezz_handle_v2: {}", e))?;
 
-    Ok(buf)
+        let fezz_free_v2: Symbol<FezzFreeV2Fn> = library
+            .get(b"fezz_free_v2")
+            .map_err(|e| format!("Failed to resolve fezz_free_v2: {}", e))?;
+
+        let owned = fezz_handle_v2(fezz_sdk::FezzSlice {
+            ptr: req_bytes.as_ptr(),
+            len: req_bytes.len(),
+        });
+
+        if owned.ptr.is_null() && owned.len != 0 {
+            return Err("fezz_handle_v2 returned null pointer".to_string());
+        }
+
+        let resp_bytes = if owned.len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(owned.ptr, owned.len).to_vec()
+        };
+
+        fezz_free_v2(owned);
+
+        Ok(resp_bytes)
+    })
+    .await
+    .map_err(|e| format!("Failed to join blocking task: {}", e))?
 }
 
 /// Creates an error HTTP response with the given status code and message.
