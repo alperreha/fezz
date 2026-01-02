@@ -1,5 +1,11 @@
-use axum::{extract::Path, routing::get, Router};
-use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
+use axum::{
+    extract::Path,
+    http::{HeaderName, HeaderValue, Request},
+    routing::get,
+    Router,
+};
+use fezz_sdk::{ByteBuf, FezzWireHeader, FezzWireRequest, FezzWireResponse};
+use http_body_util::BodyExt;
 use serde::Deserialize;
 use std::{
     sync::Arc,
@@ -35,7 +41,9 @@ async fn main() {
         "/rpc/:id",
         get({
             let root = shared_root.clone();
-            move |Path(id): Path<String>| handle_rpc(root.clone(), id)
+            move |Path(id): Path<String>, req: Request<axum::body::Body>| {
+                handle_rpc(root.clone(), id, req)
+            }
         }),
     );
 
@@ -46,8 +54,17 @@ async fn main() {
 async fn handle_rpc(
     root: Arc<String>,
     id: String,
+    req: Request<axum::body::Body>,
 ) -> axum::response::Response {
     let start_time = Instant::now();
+
+    let (parts, body) = req.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return error_response(400, format!("Failed to read request body: {}", e));
+        }
+    };
 
     // 1) Read fezz.json manifest
     let manifest_path = format!("{root}/functions/{id}/fezz.json");
@@ -73,16 +90,41 @@ async fn handle_rpc(
 
     let so_path = format!("{root}/functions/{id}/{}", manifest.entry);
 
-    // 2) Create FezzHttpRequest to send to the function process
-    let req = FezzHttpRequest {
-        method: manifest.routes[0].method.clone(),
-        path: manifest.routes[0].path.clone(),
-        headers: vec![],
-        body: None,
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| parts.uri.path().to_string());
+
+    let headers = parts
+        .headers
+        .iter()
+        .map(|(name, value)| FezzWireHeader::new(name.as_str(), value.as_bytes()))
+        .collect::<Vec<_>>();
+
+    // 2) Create FezzWireRequest to send to the function process
+    let wire_req = FezzWireRequest {
+        method: parts.method.to_string(),
+        scheme: parts.uri.scheme_str().map(|s| s.to_string()),
+        authority: parts
+            .uri
+            .authority()
+            .map(|authority| authority.as_str().to_string())
+            .or_else(|| {
+                parts
+                    .headers
+                    .get(axum::http::header::HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .map(|value| value.to_string())
+            }),
+        path_and_query,
+        headers,
+        body: ByteBuf::from(body_bytes.to_vec()),
+        meta: None,
     };
 
-    let req_json = match serde_json::to_string(&req) {
-        Ok(j) => j,
+    let req_bytes = match fezz_sdk::encode_request(&wire_req) {
+        Ok(bytes) => bytes,
         Err(e) => {
             return error_response(500, format!("Failed to serialize request: {}", e));
         }
@@ -90,8 +132,8 @@ async fn handle_rpc(
 
     // 3) Execute function in an external process via fezz-runner
     let fetch_start = Instant::now();
-    let resp_str = match execute_in_process(&so_path, &req_json).await {
-        Ok(s) => s,
+    let resp_bytes = match execute_in_process(&so_path, &req_bytes).await {
+        Ok(bytes) => bytes,
         Err(e) => {
             return error_response(500, format!("Function execution error: {}", e));
         }
@@ -100,21 +142,35 @@ async fn handle_rpc(
     let fetch_time = fetch_start.elapsed();
     println!("[HHRF] external function execution time: {:?}", fetch_time);
 
-    let fezz_resp: FezzHttpResponse = match serde_json::from_str(&resp_str) {
+    let fezz_resp: FezzWireResponse = match fezz_sdk::decode_response(&resp_bytes) {
         Ok(r) => r,
         Err(e) => {
-            return error_response(500, format!("Invalid response JSON: {}", e));
+            return error_response(500, format!("Invalid response bytes: {}", e));
         }
     };
 
     // 5) Convert to HTTP response
     let mut http_resp = axum::response::Response::builder().status(fezz_resp.status);
 
-    for (k, v) in &fezz_resp.headers {
-        http_resp = http_resp.header(k, v);
+    for header in &fezz_resp.headers {
+        let name = match HeaderName::from_bytes(&header.name) {
+            Ok(name) => name,
+            Err(_) => {
+                println!("[HHRF] Skipping invalid header name");
+                continue;
+            }
+        };
+        let value = match HeaderValue::from_bytes(&header.value) {
+            Ok(value) => value,
+            Err(_) => {
+                println!("[HHRF] Skipping invalid header value");
+                continue;
+            }
+        };
+        http_resp = http_resp.header(name, value);
     }
 
-    let body = fezz_resp.body.unwrap_or_default();
+    let body = fezz_resp.body.into_vec();
 
     let total_time = start_time.elapsed();
     println!("[HHRF] Total request time for '{}': {:?}", id, total_time);
@@ -124,9 +180,9 @@ async fn handle_rpc(
 
 /// Execute a Fezz function as an external process via the fezz-runner helper.
 ///
-/// `so_path` is the path to the dynamic library containing `fezz_fetch`.
-/// `req_json` is the FezzHttpRequest JSON string to send on stdin.
-async fn execute_in_process(so_path: &str, req_json: &str) -> Result<String, String> {
+/// `so_path` is the path to the dynamic library containing `fezz_handle_v2`.
+/// `req_bytes` is the FezzWireRequest bytes to send on stdin.
+async fn execute_in_process(so_path: &str, req_bytes: &[u8]) -> Result<Vec<u8>, String> {
     // Allow overriding runner binary via env, so users can wrap it in a jailer
     // like nsjail / firejail / bwrap on Linux.
     let runner = std::env::var("FEZZ_RUNNER").unwrap_or_else(|_| "fezz-runner".to_string());
@@ -140,17 +196,17 @@ async fn execute_in_process(so_path: &str, req_json: &str) -> Result<String, Str
         .spawn()
         .map_err(|e| format!("Failed to spawn runner '{}': {}", runner, e))?;
 
-    // Write request JSON to stdin
+    // Write request bytes to stdin
     if let Some(stdin) = child.stdin.as_mut() {
         stdin
-            .write_all(req_json.as_bytes())
+            .write_all(req_bytes)
             .await
             .map_err(|e| format!("Failed to write to runner stdin: {}", e))?;
     } else {
         return Err("Runner stdin not available".to_string());
     }
 
-    // Read response JSON from stdout
+    // Read response bytes from stdout
     let mut stdout = child
         .stdout
         .take()
@@ -171,7 +227,7 @@ async fn execute_in_process(so_path: &str, req_json: &str) -> Result<String, Str
         return Err(format!("Runner exited with status {}", status));
     }
 
-    String::from_utf8(buf).map_err(|e| format!("Invalid UTF-8 from runner: {}", e))
+    Ok(buf)
 }
 
 /// Creates an error HTTP response with the given status code and message.

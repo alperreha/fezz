@@ -10,9 +10,9 @@ HHRF artık fonksiyonları aynı process içinde `libloading` ile çalıştırma
 
 - HHRF, manifest'ten `.dylib`/`.so` yolunu okur.
 - `fezz-runner` binary'sini spawn eder ve `.dylib` yolunu argüman olarak geçirir.
-- HTTP isteğini `FezzHttpRequest` olarak JSON'a çevirip child process'in `stdin`'ine yazar.
-- Child process içindeki `fezz-runner`, ilgili library'yi yükler, `fezz_fetch` fonksiyonunu çağırır ve dönen `FezzHttpResponse` JSON'unu `stdout`'a yazar.
-- HHRF, `stdout`'tan bu JSON'u okuyup gerçek HTTP cevabına dönüştürür.
+- HTTP isteğini `FezzWireRequest` olarak CBOR bytes'a çevirip child process'in `stdin`'ine yazar.
+- Child process içindeki `fezz-runner`, ilgili library'yi yükler, `fezz_handle_v2` fonksiyonunu çağırır ve dönen `FezzWireResponse` bytes'ını `stdout`'a yazar.
+- HHRF, `stdout`'tan bu bytes'ı okuyup gerçek HTTP cevabına dönüştürür.
 
 Bu model sayesinde user kodu HHRF'den ayrı bir process olarak çalışır; panik / segfault HHRF'yi düşürmez ve ileride OS-level jailer ile izole etmek kolaylaşır.
 
@@ -37,11 +37,11 @@ export FEZZ_RUNNER=/usr/local/bin/nsjail-fezz-runner
 
 ### Panic Safety
 
-`#[fezz_function]` macro'su, user fonksiyonunu `std::panic::catch_unwind` ile saran bir `fezz_fetch` FFI entrypoint'i üretir. Böylece user kodundaki panikler FFI boundary'yi geçmez, HTTP 500 dönen structured error response'a çevrilir.
+`#[fezz_function]` macro'su, user fonksiyonunu `std::panic::catch_unwind` ile saran bir `fezz_handle_v2` FFI entrypoint'i üretir. Böylece user kodundaki panikler FFI boundary'yi geçmez, HTTP 500 dönen structured error response'a çevrilir.
 
 ### Async Runtime Isolation
 
-`fezz_fetch` exported C fonksiyonu senkron çalışır. Fonksiyon içinde HTTP/Redis gibi işler için bloklayan client'lar kullanılır. HHRF tarafında çağrı artık ayrı bir process olduğu için host async runtime'ı bloklanmaz; ek olarak process-level izolasyon kazanılır.
+`fezz_handle_v2` exported C fonksiyonu senkron çalışır. Fonksiyon içinde HTTP/Redis gibi işler için bloklayan client'lar kullanılır. HHRF tarafında çağrı artık ayrı bir process olduğu için host async runtime'ı bloklanmaz; ek olarak process-level izolasyon kazanılır.
 
 ## Best Practices for User Functions
 
@@ -55,7 +55,7 @@ Artık her çağrı ayrı bir process içinde olsa bile (özellikle `fezz-runner
 ### Guidelines
 
 1. **Blocking client kullan**: FFI interface senkron olduğu için HTTP/DB için bloklayan client'lar en sade yol.
-2. **Panik yerine hata döndür**: Panik etmek yerine `FezzHttpResponse` ile düzgün hata mesajları dön.
+2. **Panik yerine hata döndür**: Panik etmek yerine `FezzWireResponse` ile düzgün hata mesajları dön.
 3. **Stateless tasarla**: İş mantığını her request bağımsız olacak şekilde yaz; global mutable state'e güvenme.
 4. **Timeout'ları düşün**: Dış servis çağrılarına makul timeout'lar koy; child process askıda kalmasın.
 

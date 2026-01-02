@@ -7,51 +7,55 @@ pub fn fezz_function(_args: TokenStream, input: TokenStream) -> TokenStream {
     let func = parse_macro_input!(input as ItemFn);
     let func_name = &func.sig.ident;
 
-    // Generate fezz_fetch wrapper with panic safety
-    // The function is marked unsafe because it accepts a raw pointer that must
-    // be valid and point to a null-terminated C string.
+    // Generate bytes-first ABI wrapper with panic safety.
     let expanded = quote! {
         #func
 
-        /// FFI entry point for the Fezz function.
+        /// FFI entry point for the Fezz function (bytes-first ABI).
         ///
         /// # Safety
         ///
-        /// The caller must ensure that `req_json` is a valid pointer to a
-        /// null-terminated C string containing valid UTF-8 JSON data.
-        ///
-        /// # Memory
-        ///
-        /// The returned pointer is allocated using `CString::into_raw()` and must be
-        /// freed by the caller using `CString::from_raw()`.
+        /// The caller must ensure that `req` points to a valid byte slice of length `len`.
         #[no_mangle]
-        pub unsafe extern "C" fn fezz_fetch(req_json: *const std::os::raw::c_char) -> *mut std::os::raw::c_char {
-            use std::ffi::{CStr, CString};
-            use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
+        pub unsafe extern "C" fn fezz_handle_v2(req: fezz_sdk::FezzSlice) -> fezz_sdk::FezzOwned {
+            use fezz_sdk::{FezzWireHeader, FezzWireResponse};
 
             // Wrap the entire function body in catch_unwind to prevent panics
             // from crossing the FFI boundary (which is undefined behavior).
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // C char* -> String
-                let c_str = CStr::from_ptr(req_json);
-                let req_str = c_str.to_str().unwrap_or("{}");
-                let req: FezzHttpRequest = match serde_json::from_str(req_str) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return FezzHttpResponse {
-                            status: 400,
-                            headers: vec![("content-type".into(), "application/json".into())],
-                            body: Some(format!("{{\"error\":\"Invalid request: {}\"}}", e)),
-                        };
-                    }
+                if req.ptr.is_null() && req.len != 0 {
+                    return Err("Null request pointer with non-zero length".to_string());
+                }
+
+                let req_bytes = if req.len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(req.ptr, req.len)
                 };
 
+                let req = match fezz_sdk::decode_request(req_bytes) {
+                    Ok(r) => r,
+                    Err(e) => {
+                    let resp = FezzWireResponse::new(
+                        400,
+                        vec![FezzWireHeader::new("content-type", "application/json")],
+                        format!("{{\"error\":\"Invalid request: {}\"}}", e).into_bytes(),
+                    );
+                    return Ok(resp);
+                }
+            };
+
                 // Call user function
-                #func_name(req)
+                Ok(#func_name(req))
             }));
 
-            let resp: FezzHttpResponse = match result {
-                Ok(r) => r,
+            let resp: FezzWireResponse = match result {
+                Ok(Ok(r)) => r,
+                Ok(Err(message)) => FezzWireResponse::new(
+                    400,
+                    vec![FezzWireHeader::new("content-type", "application/json")],
+                    format!("{{\"error\":\"{}\"}}", message).into_bytes(),
+                ),
                 Err(panic_info) => {
                     // A panic occurred - return an error response instead of crashing
                     let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -62,30 +66,30 @@ pub fn fezz_function(_args: TokenStream, input: TokenStream) -> TokenStream {
                         "Unknown panic".to_string()
                     };
 
-                    FezzHttpResponse {
-                        status: 500,
-                        headers: vec![("content-type".into(), "application/json".into())],
-                        body: Some(format!("{{\"error\":\"Function panicked: {}\"}}", panic_msg)),
-                    }
+                    FezzWireResponse::new(
+                        500,
+                        vec![FezzWireHeader::new("content-type", "application/json")],
+                        format!("{{\"error\":\"Function panicked: {}\"}}", panic_msg).into_bytes(),
+                    )
                 }
             };
 
-            let resp_str = match serde_json::to_string(&resp) {
-                Ok(s) => s,
-                Err(_) => {
-                    // Fallback: construct a valid FezzHttpResponse JSON manually
-                    // Headers are serialized as an array of [key, value] tuples
-                    r#"{"status":500,"headers":[["content-type","application/json"]],"body":"{\"error\":\"Serialization failed\"}"}"#.to_string()
-                }
+            let mut resp_bytes = match fezz_sdk::encode_response(&resp) {
+                Ok(b) => b,
+                Err(_) => Vec::new(),
             };
-            let c_string = match CString::new(resp_str) {
-                Ok(s) => s,
-                Err(_) => {
-                    // Fallback for CString creation failure
-                    CString::new(r#"{"status":500,"headers":[["content-type","application/json"]],"body":"{\"error\":\"CString creation failed\"}"}"#).unwrap()
-                }
-            };
-            c_string.into_raw()
+            let len = resp_bytes.len();
+            let ptr = resp_bytes.as_mut_ptr();
+            std::mem::forget(resp_bytes);
+            fezz_sdk::FezzOwned { ptr, len }
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn fezz_free_v2(buf: fezz_sdk::FezzOwned) {
+            if buf.ptr.is_null() {
+                return;
+            }
+            let _ = Vec::from_raw_parts(buf.ptr, buf.len, buf.len);
         }
     };
 
