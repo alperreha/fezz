@@ -185,6 +185,7 @@ async fn execute_in_process(so_path: &str, req_bytes: &[u8]) -> Result<Vec<u8>, 
         return Err(format!("Library not found at {}", so_path));
     }
 
+    let so_path = so_path.to_string();
     let req_bytes = req_bytes.to_vec();
 
     tokio::task::spawn_blocking(move || unsafe {
