@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use deno_core::{
     futures::executor::block_on,
+    op,
     v8,
-    FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
+    Extension, FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
 };
-use std::{collections::HashMap, fs, path::Path, rc::Rc};
+use futures_timer::Delay;
+use std::{collections::HashMap, fs, path::Path, rc::Rc, time::Duration};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -115,11 +117,35 @@ function normalizeBody(body) {
 
 globalThis.Response = Response;
 globalThis.__fezz_normalize_response = __fezz_normalize_response;
+globalThis.setTimeout = (callback, ms = 0, ...args) => {
+  const delay = Number(ms) || 0;
+  const id = ++globalThis.__fezz_timeout_id;
+  Deno.core.opAsync("op_sleep", delay).then(() => {
+    if (globalThis.__fezz_cleared_timeouts.has(id)) {
+      return;
+    }
+    callback(...args);
+  });
+  return id;
+};
+globalThis.clearTimeout = (id) => {
+  globalThis.__fezz_cleared_timeouts.add(id);
+};
+globalThis.__fezz_timeout_id = 0;
+globalThis.__fezz_cleared_timeouts = new Set();
 "#;
 
+#[op]
+async fn op_sleep(ms: u64) -> Result<(), anyhow::Error> {
+    Delay::new(Duration::from_millis(ms)).await;
+    Ok(())
+}
+
 fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
+    let timer_ext = Extension::builder().ops(vec![op_sleep::decl()]).build();
     let mut runtime = JsRuntime::new(RuntimeOptions {
         module_loader: Some(Rc::new(FsModuleLoader)),
+        extensions: vec![timer_ext],
         ..Default::default()
     });
 
@@ -170,8 +196,56 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         )
         .ok_or_else(|| anyhow!("JS fetch handler threw an exception"))?;
 
+    if result.is_promise() {
+        let promise = unsafe { v8::Local::<v8::Promise>::cast(result) };
+        let promise = v8::Global::new(&mut scope, promise);
+        drop(scope);
+        let resolved = resolve_promise(&mut runtime, promise)?;
+        let mut scope = runtime.handle_scope();
+        let resolved_value = v8::Local::new(&mut scope, &resolved);
+        let normalized = normalize_response(&mut scope, resolved_value)?;
+        return extract_response(&mut scope, normalized);
+    }
+
     let normalized = normalize_response(&mut scope, result)?;
     extract_response(&mut scope, normalized)
+}
+
+fn resolve_promise(
+    runtime: &mut JsRuntime,
+    promise: v8::Global<v8::Promise>,
+) -> Result<v8::Global<v8::Value>> {
+    loop {
+        block_on(runtime.run_event_loop(PollEventLoopOptions::default()))
+            .context("Failed to run JS event loop")?;
+        let mut scope = runtime.handle_scope();
+        let promise = v8::Local::new(&mut scope, &promise);
+        match promise.state() {
+            v8::PromiseState::Pending => continue,
+            v8::PromiseState::Fulfilled => {
+                let value = promise.result(&mut scope);
+                return Ok(v8::Global::new(&mut scope, value));
+            }
+            v8::PromiseState::Rejected => {
+                let reason = promise.result(&mut scope);
+                let reason = format_js_error(&mut scope, reason);
+                return Err(anyhow!("JS fetch promise rejected: {}", reason));
+            }
+        }
+    }
+}
+
+fn format_js_error<'a>(
+    scope: &mut v8::HandleScope<'a>,
+    value: v8::Local<'a, v8::Value>,
+) -> String {
+    if let Some(string) = value.to_string(scope) {
+        return string.to_rust_string_lossy(scope);
+    }
+    if let Some(json) = v8::json::stringify(scope, value) {
+        return json.to_rust_string_lossy(scope);
+    }
+    "<non-string rejection>".to_string()
 }
 
 fn resolve_fetch<'a>(
