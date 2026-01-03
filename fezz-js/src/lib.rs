@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use deno_core::{
     futures::executor::block_on,
     v8,
-    FsModuleLoader, JsRuntime, ModuleSpecifier, RuntimeOptions,
+    FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
 };
 use std::{collections::HashMap, path::Path, rc::Rc};
 use tokio::sync::Mutex;
@@ -56,7 +56,7 @@ impl JsRuntimeManager {
         let script_path = script_path.to_string();
         tokio::task::spawn_blocking(move || run_js(&script_path, req))
             .await
-            .context("Failed to join JS task")??
+            .context("Failed to join JS task")?
     }
 }
 
@@ -130,13 +130,15 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
     let module_specifier = ModuleSpecifier::from_file_path(script_path)
         .map_err(|_| anyhow!("Invalid JS module path: {}", script_path))?;
 
-    let module_id = block_on(runtime.load_main_module(&module_specifier, None))
+    let module_id = block_on(runtime.load_main_es_module(&module_specifier))
         .context("Failed to load JS module")?;
 
     let mut evaluation = runtime.mod_evaluate(module_id);
     block_on(async {
-        runtime.run_event_loop(false).await?;
-        evaluation.await??;
+        runtime
+            .run_event_loop(PollEventLoopOptions::default())
+            .await?;
+        evaluation.await?;
         Ok::<(), anyhow::Error>(())
     })
     .context("Failed to evaluate JS module")?;
@@ -232,9 +234,12 @@ fn build_headers<'a>(
         let entry = v8::Array::new(scope, 2);
         let name_value = v8::String::new(scope, name).unwrap();
         let value_value = v8::String::new(scope, value).unwrap();
-        entry.set(scope, 0, name_value.into());
-        entry.set(scope, 1, value_value.into());
-        array.set(scope, idx as u32, entry.into());
+        let key_index = v8::Integer::new(scope, 0);
+        entry.set(scope, key_index.into(), name_value.into());
+        let value_index = v8::Integer::new(scope, 1);
+        entry.set(scope, value_index.into(), value_value.into());
+        let array_index = v8::Integer::new(scope, idx as i32);
+        array.set(scope, array_index.into(), entry.into());
     }
     Ok(array)
 }
@@ -260,7 +265,9 @@ fn build_body<'a>(
         return Ok(v8::String::new(scope, "").unwrap().into());
     }
 
-    let backing_store = v8::ArrayBuffer::new_backing_store_from_boxed_slice(body.to_vec().into_boxed_slice());
+    let backing_store =
+        v8::ArrayBuffer::new_backing_store_from_boxed_slice(body.to_vec().into_boxed_slice());
+    let backing_store = backing_store.make_shared();
     let array_buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
     let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, body.len())
         .ok_or_else(|| anyhow!("Failed to create Uint8Array"))?;
@@ -339,17 +346,22 @@ fn get_headers<'a>(
     let array = unsafe { v8::Local::<v8::Array>::cast(value) };
     let mut headers = Vec::new();
     for idx in 0..array.length() {
-        let entry = array.get(scope, idx).unwrap_or_else(|| v8::undefined(scope).into());
+        let entry_index = v8::Integer::new(scope, idx as i32);
+        let entry = array
+            .get(scope, entry_index.into())
+            .unwrap_or_else(|| v8::undefined(scope).into());
         if !entry.is_array() {
             continue;
         }
         let entry_array = unsafe { v8::Local::<v8::Array>::cast(entry) };
+        let key_index = v8::Integer::new(scope, 0);
         let name = entry_array
-            .get(scope, 0)
+            .get(scope, key_index.into())
             .and_then(|val| val.to_string(scope))
             .map(|s| s.to_rust_string_lossy(scope));
+        let value_index = v8::Integer::new(scope, 1);
         let value = entry_array
-            .get(scope, 1)
+            .get(scope, value_index.into())
             .and_then(|val| val.to_string(scope))
             .map(|s| s.to_rust_string_lossy(scope));
         if let (Some(name), Some(value)) = (name, value) {
@@ -397,8 +409,9 @@ fn get_body<'a>(
                             let array = unsafe { v8::Local::<v8::Array>::cast(body_value) };
                             let mut bytes = Vec::with_capacity(array.length() as usize);
                             for idx in 0..array.length() {
+                                let entry_index = v8::Integer::new(scope, idx as i32);
                                 let entry = array
-                                    .get(scope, idx)
+                                    .get(scope, entry_index.into())
                                     .and_then(|val| val.integer_value(scope));
                                 if let Some(value) = entry {
                                     bytes.push(value as u8);
