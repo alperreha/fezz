@@ -37,6 +37,22 @@ cargo run -p hhrf --release
 curl http://127.0.0.1:3000/rpc/acme/todos/0.0.1/hello
 ```
 
+### 5. JS embed demo (fezz.js)
+
+```bash
+cat <<'EOF' > ./functions/acme/todos/0.0.1/fezz.js
+export default {
+  async fetch(request, env, ctx) {
+    return new Response(`ok: ${request.method} ${request.path}`);
+  },
+};
+EOF
+```
+
+```bash
+curl "http://127.0.0.1:3000/js-embed/acme/todos/0.0.1/hello?x=1"
+```
+
 
 
 ### Runner'ı Jail ile Sarmak
