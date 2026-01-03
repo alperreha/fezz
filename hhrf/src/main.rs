@@ -4,6 +4,7 @@ use axum::{
     routing::any,
     Router,
 };
+use fezz_js::{JsInvoke, JsKey, JsRuntimeManager};
 use fezz_sdk::{ByteBuf, FezzWireHeader, FezzWireRequest, FezzWireResponse};
 use http_body_util::BodyExt;
 use libloading::{Library, Symbol};
@@ -19,6 +20,7 @@ async fn main() {
     // HHRF_ROOT env'den gelsin
     let root = std::env::var("HHRF_ROOT").unwrap_or_else(|_| "./HHRF_ROOT".into());
     let shared_root = Arc::new(root);
+    let js_runtime_manager = Arc::new(JsRuntimeManager::new());
 
     let app = Router::new().route(
         "/rpc/:org/:func/:version/*tail",
@@ -29,10 +31,134 @@ async fn main() {
                 handle_rpc(root.clone(), org, func, version, req)
             }
         }),
+    )
+    .route(
+        "/js-embed/:org/:func/:version/*tail",
+        any({
+            let root = shared_root.clone();
+            let js_runtime_manager = js_runtime_manager.clone();
+            move |Path((org, func, version, _tail)): Path<(String, String, String, String)>,
+                  req: Request<axum::body::Body>| {
+                handle_js(
+                    root.clone(),
+                    js_runtime_manager.clone(),
+                    org,
+                    func,
+                    version,
+                    req,
+                )
+            }
+        }),
     );
 
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn handle_js(
+    root: Arc<String>,
+    js_runtime_manager: Arc<JsRuntimeManager>,
+    org: String,
+    func: String,
+    version: String,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    let start_time = Instant::now();
+
+    let (parts, body) = req.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return error_response(400, format!("Failed to read request body: {}", e));
+        }
+    };
+
+    let prefix = format!("/js-embed/{org}/{func}/{version}");
+    let mut stripped_path = parts
+        .uri
+        .path()
+        .strip_prefix(&prefix)
+        .unwrap_or(parts.uri.path())
+        .to_string();
+    if stripped_path.is_empty() {
+        stripped_path = "/".to_string();
+    }
+    if !stripped_path.starts_with('/') {
+        stripped_path = format!("/{stripped_path}");
+    }
+    let path_and_query = if let Some(query) = parts.uri.query() {
+        format!("{stripped_path}?{query}")
+    } else {
+        stripped_path
+    };
+
+    let function_root = format!("{root}/functions/{org}/{func}/{version}");
+    let script_path = format!("{function_root}/fezz.js");
+    let env_path = format!("{function_root}/.env");
+
+    let env_vars = load_env_vars(&env_path);
+
+    let headers = parts
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    let js_key = JsKey {
+        org: org.clone(),
+        func: func.clone(),
+        version: version.clone(),
+    };
+
+    let js_req = JsInvoke {
+        method: parts.method.to_string(),
+        path_and_query,
+        headers,
+        body: body_bytes.to_vec(),
+        env: env_vars,
+    };
+
+    let result = match js_runtime_manager.invoke(&js_key, &script_path, js_req).await {
+        Ok(result) => result,
+        Err(err) => {
+            return error_response(500, format!("JS execution error: {}", err));
+        }
+    };
+
+    let mut http_resp = axum::response::Response::builder().status(result.status);
+
+    for (name, value) in result.headers {
+        let name = match HeaderName::from_bytes(name.as_bytes()) {
+            Ok(name) => name,
+            Err(_) => {
+                println!("[HHRF] Skipping invalid header name");
+                continue;
+            }
+        };
+        let value = match HeaderValue::from_bytes(value.as_bytes()) {
+            Ok(value) => value,
+            Err(_) => {
+                println!("[HHRF] Skipping invalid header value");
+                continue;
+            }
+        };
+        http_resp = http_resp.header(name, value);
+    }
+
+    let total_time = start_time.elapsed();
+    println!(
+        "[HHRF] Total JS request time for '{}/{}/{}': {:?}",
+        org, func, version, total_time
+    );
+
+    http_resp
+        .body(axum::body::Body::from(result.body))
+        .unwrap()
 }
 
 async fn handle_rpc(

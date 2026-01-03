@@ -2,6 +2,7 @@
 members = [
   "fezz-sdk",
   "fezz-macros",
+  "fezz-js",
   "hhrf",
   "example_todosapi",
   "example_redis",

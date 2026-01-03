@@ -1,0 +1,9 @@
+[package]
+name = "fezz-js"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+deno_core = "0.272.0"
+tokio = { version = "1", features = ["sync", "rt"] }
