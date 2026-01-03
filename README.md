@@ -2,19 +2,42 @@
 
 A single Rust-based Host HTTP Runtime (HHRF) runs lightweight "fetch-like" Fezz function modules using a load-run-unload execution model, providing a serverless-style platform.
 
-## Architecture
+## Demo
 
-### Process-Based Execution (fezz-runner)
+### 1. Build sample function and runner
 
-HHRF artık fonksiyonları aynı process içinde `libloading` ile çalıştırmak yerine, her çağrıyı ayrı bir **child process** üzerinden yürütür:
+```bash
+cargo build --release -p example_todosapi -p hhrf
+```
 
-- HHRF, manifest'ten `.dylib`/`.so` yolunu okur.
-- `fezz-runner` binary'sini spawn eder ve `.dylib` yolunu argüman olarak geçirir.
-- HTTP isteğini `FezzWireRequest` olarak CBOR bytes'a çevirip child process'in `stdin`'ine yazar.
-- Child process içindeki `fezz-runner`, ilgili library'yi yükler, `fezz_handle_v2` fonksiyonunu çağırır ve dönen `FezzWireResponse` bytes'ını `stdout`'a yazar.
-- HHRF, `stdout`'tan bu bytes'ı okuyup gerçek HTTP cevabına dönüştürür.
+### 2. Fonksiyon kütüphanesini functions klasörüne koy
 
-Bu model sayesinde user kodu HHRF'den ayrı bir process olarak çalışır; panik / segfault HHRF'yi düşürmez ve ileride OS-level jailer ile izole etmek kolaylaşır.
+```bash
+# org/func/version formatında dizin oluştur
+mkdir -p ./functions/acme/todos/0.0.1
+cp target/release/libexample_todosapi.dylib ./functions/acme/todos/0.0.1/fezz.so
+```
+
+İsterseniz `.env` dosyası da ekleyebilirsiniz:
+
+```bash
+echo "EXAMPLE_VAR=demo" > ./functions/acme/todos/0.0.1/.env
+```
+
+### 3. HHRF server'ını çalıştır
+
+```bash
+export HHRF_ROOT=.
+cargo run -p hhrf --release
+```
+
+### 4. Fonksiyonu test et
+
+```bash
+curl http://127.0.0.1:3000/rpc/acme/todos/0.0.1/hello
+```
+
+
 
 ### Runner'ı Jail ile Sarmak
 
@@ -58,38 +81,3 @@ Artık her çağrı ayrı bir process içinde olsa bile (özellikle `fezz-runner
 2. **Panik yerine hata döndür**: Panik etmek yerine `FezzWireResponse` ile düzgün hata mesajları dön.
 3. **Stateless tasarla**: İş mantığını her request bağımsız olacak şekilde yaz; global mutable state'e güvenme.
 4. **Timeout'ları düşün**: Dış servis çağrılarına makul timeout'lar koy; child process askıda kalmasın.
-
-## Demo
-
-### 1. Build sample function and runner
-
-```bash
-cargo build --release -p example_todosapi -p hhrf
-```
-
-### 2. Fonksiyon kütüphanesini functions klasörüne koy
-
-```bash
-# org/func/version formatında dizin oluştur
-mkdir -p ./functions/acme/todos/0.0.1
-cp target/release/libexample_todosapi.dylib ./functions/acme/todos/0.0.1/fezz.so
-```
-
-İsterseniz `.env` dosyası da ekleyebilirsiniz:
-
-```bash
-echo "EXAMPLE_VAR=demo" > ./functions/acme/todos/0.0.1/.env
-```
-
-### 3. HHRF server'ını çalıştır
-
-```bash
-export HHRF_ROOT=.
-cargo run -p hhrf --release
-```
-
-### 4. Fonksiyonu test et
-
-```bash
-curl http://127.0.0.1:3000/rpc/acme/todos/0.0.1/hello
-```
