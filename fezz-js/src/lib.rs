@@ -1,11 +1,15 @@
 use anyhow::{anyhow, Context, Result};
 use deno_runtime::{
-    deno_core::{futures::executor::block_on, v8, JsRuntime, ModuleSpecifier, PollEventLoopOptions},
+    deno_core::{
+        futures::executor::block_on, v8, JsRuntime, MaybeArc, ModuleSpecifier,
+        PollEventLoopOptions,
+    },
     deno_permissions::{Permissions, PermissionsContainer},
+    permissions::RuntimePermissionDescriptorParser,
     worker::{MainWorker, WorkerOptions},
     BootstrapOptions,
 };
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, fs, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -118,7 +122,16 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         )
     })?;
 
-    let permissions = PermissionsContainer::new(Permissions::allow_all());
+    let permissions_parser =
+        RuntimePermissionDescriptorParser::new(Arc::new(deno_runtime::deno_fs::RealFs));
+    let permissions = PermissionsContainer::new(
+        MaybeArc::new(permissions_parser),
+        Permissions::allow_all(),
+    );
+    let worker_service_options = deno_runtime::worker::WorkerServiceOptions {
+        permissions,
+        ..Default::default()
+    };
     let worker_options = WorkerOptions {
         bootstrap: BootstrapOptions {
             args: vec![],
@@ -126,8 +139,11 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         },
         ..Default::default()
     };
-    let mut worker =
-        MainWorker::bootstrap_from_options(&module_specifier, permissions, worker_options);
+    let mut worker = MainWorker::bootstrap_from_options(
+        &module_specifier,
+        worker_service_options,
+        worker_options,
+    );
     let runtime = &mut worker.js_runtime;
 
     runtime
@@ -150,8 +166,9 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
     let module_namespace = runtime
         .get_module_namespace(module_id)
         .context("Failed to get module namespace")?;
-    let mut scope = runtime.handle_scope();
-    let mut scope = scope.enter();
+    let scope = &mut v8::HandleScope::new(runtime.v8_isolate());
+    let context = v8::Local::new(scope, runtime.main_context());
+    let mut scope = v8::ContextScope::new(scope, context);
     let module_namespace = v8::Local::new(&mut scope, module_namespace);
 
     let fetch_fn = resolve_fetch(&mut scope, module_namespace)?;
@@ -174,8 +191,9 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         let promise = v8::Global::new(&mut scope, promise);
         drop(scope);
         let resolved = resolve_promise(&mut runtime, promise)?;
-        let mut scope = runtime.handle_scope();
-        let mut scope = scope.enter();
+        let scope = &mut v8::HandleScope::new(runtime.v8_isolate());
+        let context = v8::Local::new(scope, runtime.main_context());
+        let mut scope = v8::ContextScope::new(scope, context);
         let resolved_value = v8::Local::new(&mut scope, &resolved);
         let normalized = normalize_response(&mut scope, resolved_value)?;
         return extract_response(&mut scope, normalized);
@@ -192,8 +210,9 @@ fn resolve_promise(
     loop {
         block_on(runtime.run_event_loop(PollEventLoopOptions::default()))
             .context("Failed to run JS event loop")?;
-        let mut scope = runtime.handle_scope();
-        let mut scope = scope.enter();
+        let scope = &mut v8::HandleScope::new(runtime.v8_isolate());
+        let context = v8::Local::new(scope, runtime.main_context());
+        let mut scope = v8::ContextScope::new(scope, context);
         let promise = v8::Local::new(&mut scope, &promise);
         match promise.state() {
             v8::PromiseState::Pending => continue,
@@ -211,7 +230,7 @@ fn resolve_promise(
 }
 
 fn format_js_error<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     value: v8::Local<'a, v8::Value>,
 ) -> String {
     if let Some(string) = value.to_string(scope) {
@@ -224,7 +243,7 @@ fn format_js_error<'a>(
 }
 
 fn resolve_fetch<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     module_namespace: v8::Local<'a, v8::Object>,
 ) -> Result<v8::Local<'a, v8::Function>> {
     let fetch_key = v8::String::new(scope, "fetch").unwrap();
@@ -258,7 +277,7 @@ fn resolve_fetch<'a>(
 }
 
 fn build_request<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     req: &JsInvoke,
 ) -> Result<v8::Local<'a, v8::Object>> {
     let obj = v8::Object::new(scope);
@@ -283,7 +302,7 @@ fn build_request<'a>(
 }
 
 fn build_headers<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     headers: &[(String, String)],
 ) -> Result<v8::Local<'a, v8::Array>> {
     let array = v8::Array::new(scope, headers.len() as i32);
@@ -302,7 +321,7 @@ fn build_headers<'a>(
 }
 
 fn build_env<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     env: &[(String, String)],
 ) -> Result<v8::Local<'a, v8::Object>> {
     let obj = v8::Object::new(scope);
@@ -315,7 +334,7 @@ fn build_env<'a>(
 }
 
 fn build_body<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     body: &[u8],
 ) -> Result<v8::Local<'a, v8::Value>> {
     if body.is_empty() {
@@ -332,7 +351,7 @@ fn build_body<'a>(
 }
 
 fn normalize_response<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     value: v8::Local<'a, v8::Value>,
 ) -> Result<v8::Local<'a, v8::Object>> {
     let global = scope.get_current_context().global(scope);
@@ -357,7 +376,7 @@ fn normalize_response<'a>(
 }
 
 fn extract_response<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     response: v8::Local<'a, v8::Object>,
 ) -> Result<JsResult> {
     let status = get_u16_property(scope, response, "status")?.unwrap_or(200);
@@ -372,7 +391,7 @@ fn extract_response<'a>(
 }
 
 fn get_u16_property<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     obj: v8::Local<'a, v8::Object>,
     key: &str,
 ) -> Result<Option<u16>> {
@@ -389,7 +408,7 @@ fn get_u16_property<'a>(
 }
 
 fn get_headers<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     obj: v8::Local<'a, v8::Object>,
 ) -> Result<Vec<(String, String)>> {
     let key_value = v8::String::new(scope, "headers").unwrap();
@@ -431,7 +450,7 @@ fn get_headers<'a>(
 }
 
 fn get_body<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     obj: v8::Local<'a, v8::Object>,
 ) -> Result<Vec<u8>> {
     let key_value = v8::String::new(scope, "body").unwrap();
@@ -507,7 +526,7 @@ fn get_body<'a>(
 }
 
 fn get_string_property<'a>(
-    scope: &mut v8::PinScope<'a, '_>,
+    scope: &mut v8::HandleScope<'a>,
     obj: v8::Local<'a, v8::Object>,
     key: &str,
 ) -> Result<Option<String>> {
