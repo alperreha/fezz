@@ -154,7 +154,10 @@ async fn handle_rpc(
     let body = fezz_resp.body.into_vec();
 
     let total_time = start_time.elapsed();
-    println!("[HHRF] Total request time for '{}': {:?}", id, total_time);
+    println!(
+        "[HHRF] Total request time for '{}/{}/{}': {:?}",
+        org, func, version, total_time
+    );
 
     http_resp.body(axum::body::Body::from(body)).unwrap()
 }
