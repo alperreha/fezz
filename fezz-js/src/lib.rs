@@ -3,7 +3,7 @@ use deno_core::{
     futures::executor::block_on,
     op2,
     v8,
-    Extension, FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
+    FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
 };
 use std::{collections::HashMap, fs, path::Path, rc::Rc, time::Duration};
 use tokio::sync::Mutex;
@@ -155,13 +155,12 @@ async fn op_fezz_sleep(#[smi] timeout_ms: u64) {
     tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
 }
 
+deno_core::extension!(fezz_timers, ops = [op_fezz_sleep]);
+
 fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
-    let extension = Extension::builder("fezz_timers")
-        .ops(vec![op_fezz_sleep::decl()])
-        .build();
     let mut runtime = JsRuntime::new(RuntimeOptions {
         module_loader: Some(Rc::new(FsModuleLoader)),
-        extensions: vec![extension],
+        extensions: vec![fezz_timers::init_ops_and_esm()],
         ..Default::default()
     });
 
