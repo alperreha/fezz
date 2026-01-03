@@ -4,7 +4,7 @@ use deno_core::{
     v8,
     FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
 };
-use std::{collections::HashMap, path::Path, rc::Rc};
+use std::{collections::HashMap, fs, path::Path, rc::Rc};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -127,8 +127,14 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         .execute_script("<fezz-bootstrap>", BOOTSTRAP)
         .context("Failed to execute JS bootstrap")?;
 
-    let module_specifier = ModuleSpecifier::from_file_path(script_path)
-        .map_err(|_| anyhow!("Invalid JS module path: {}", script_path))?;
+    let canonical_path = fs::canonicalize(script_path)
+        .with_context(|| format!("Failed to canonicalize JS module path: {}", script_path))?;
+    let module_specifier = ModuleSpecifier::from_file_path(&canonical_path).map_err(|_| {
+        anyhow!(
+            "Invalid JS module path: {}",
+            canonical_path.display()
+        )
+    })?;
 
     let module_id = block_on(runtime.load_main_es_module(&module_specifier))
         .context("Failed to load JS module")?;
