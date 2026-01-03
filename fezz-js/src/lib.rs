@@ -1,13 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use deno_runtime::{
-    deno_core::{
-        futures::executor::block_on, v8, FsModuleLoader, ModuleSpecifier, PollEventLoopOptions,
-    },
-    permissions::{Permissions, PermissionsContainer},
+    deno_core::{futures::executor::block_on, v8, JsRuntime, ModuleSpecifier, PollEventLoopOptions},
+    deno_permissions::{Permissions, PermissionsContainer},
     worker::{MainWorker, WorkerOptions},
     BootstrapOptions,
 };
-use std::{collections::HashMap, fs, path::Path, rc::Rc};
+use std::{collections::HashMap, fs, path::Path};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -126,11 +124,10 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
             args: vec![],
             ..Default::default()
         },
-        module_loader: Rc::new(FsModuleLoader),
         ..Default::default()
     };
     let mut worker =
-        MainWorker::bootstrap_from_options(module_specifier.clone(), permissions, worker_options);
+        MainWorker::bootstrap_from_options(&module_specifier, permissions, worker_options);
     let runtime = &mut worker.js_runtime;
 
     runtime
@@ -218,10 +215,10 @@ fn format_js_error<'a>(
     value: v8::Local<'a, v8::Value>,
 ) -> String {
     if let Some(string) = value.to_string(scope) {
-        return string.to_rust_string_lossy(scope.get_isolate());
+        return string.to_rust_string_lossy(scope.get_isolate_ptr());
     }
     if let Some(json) = v8::json::stringify(scope, value) {
-        return json.to_rust_string_lossy(scope.get_isolate());
+        return json.to_rust_string_lossy(scope.get_isolate_ptr());
     }
     "<non-string rejection>".to_string()
 }
@@ -338,7 +335,7 @@ fn normalize_response<'a>(
     scope: &mut v8::PinScope<'a, '_>,
     value: v8::Local<'a, v8::Value>,
 ) -> Result<v8::Local<'a, v8::Object>> {
-    let global = scope.with_current_context().global(scope);
+    let global = scope.get_current_context().global(scope);
     let normalizer_key = v8::String::new(scope, "__fezz_normalize_response").unwrap();
     let normalizer_value = global
         .get(scope, normalizer_key.into())
@@ -419,12 +416,12 @@ fn get_headers<'a>(
         let name = entry_array
             .get(scope, key_index.into())
             .and_then(|val| val.to_string(scope))
-            .map(|s| s.to_rust_string_lossy(scope.get_isolate()));
+            .map(|s| s.to_rust_string_lossy(scope.get_isolate_ptr()));
         let value_index = v8::Integer::new(scope, 1);
         let value = entry_array
             .get(scope, value_index.into())
             .and_then(|val| val.to_string(scope))
-            .map(|s| s.to_rust_string_lossy(scope.get_isolate()));
+            .map(|s| s.to_rust_string_lossy(scope.get_isolate_ptr()));
         if let (Some(name), Some(value)) = (name, value) {
             headers.push((name, value));
         }
@@ -451,7 +448,7 @@ fn get_body<'a>(
         let string = value
             .to_string(scope)
             .ok_or_else(|| anyhow!("Failed to read response body string"))?;
-        return Ok(string.to_rust_string_lossy(scope.get_isolate()).into_bytes());
+        return Ok(string.to_rust_string_lossy(scope.get_isolate_ptr()).into_bytes());
     }
 
     if value.is_object() {
@@ -486,10 +483,14 @@ fn get_body<'a>(
                             let string = body_value
                                 .to_string(scope)
                                 .ok_or_else(|| anyhow!("Failed to read response body string"))?;
-                            return Ok(string.to_rust_string_lossy(scope.get_isolate()).into_bytes());
+                            return Ok(
+                                string.to_rust_string_lossy(scope.get_isolate_ptr()).into_bytes(),
+                            );
                         }
                         if let Some(json) = v8::json::stringify(scope, body_value) {
-                            return Ok(json.to_rust_string_lossy(scope.get_isolate()).into_bytes());
+                            return Ok(
+                                json.to_rust_string_lossy(scope.get_isolate_ptr()).into_bytes(),
+                            );
                         }
                     }
                 }
@@ -498,7 +499,7 @@ fn get_body<'a>(
         }
 
         if let Some(json) = v8::json::stringify(scope, value) {
-            return Ok(json.to_rust_string_lossy(scope.get_isolate()).into_bytes());
+            return Ok(json.to_rust_string_lossy(scope.get_isolate_ptr()).into_bytes());
         }
     }
 
@@ -519,7 +520,7 @@ fn get_string_property<'a>(
         let value = value
             .to_string(scope)
             .ok_or_else(|| anyhow!("Failed to read string property"))?;
-        return Ok(Some(value.to_rust_string_lossy(scope.get_isolate())));
+        return Ok(Some(value.to_rust_string_lossy(scope.get_isolate_ptr())));
     }
     Ok(None)
 }
