@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Context, Result};
-use deno_core::{
-    futures::executor::block_on,
-    op2,
-    v8,
-    Extension, FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
+use deno_runtime::{
+    deno_core::{
+        futures::executor::block_on, v8, FsModuleLoader, ModuleSpecifier, PollEventLoopOptions,
+    },
+    permissions::{Permissions, PermissionsContainer},
+    worker::{MainWorker, WorkerOptions},
+    BootstrapOptions,
 };
-use std::{collections::HashMap, fs, path::Path, rc::Rc, time::Duration};
+use std::{collections::HashMap, fs, path::Path, rc::Rc};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -62,14 +64,6 @@ impl JsRuntimeManager {
 }
 
 const BOOTSTRAP: &str = r#"
-class Response {
-  constructor(body, init = {}) {
-    this.status = init.status ?? 200;
-    this.headers = init.headers ?? [];
-    this.body = body ?? "";
-  }
-}
-
 function __fezz_normalize_response(resp) {
   if (resp instanceof Response) {
     return {
@@ -113,62 +107,10 @@ function normalizeBody(body) {
 
   return { type: "text", value: body ?? "" };
 }
-
-const __fezz_timeouts = new Map();
-let __fezz_timeout_id = 0;
-
-function setTimeout(handler, timeout = 0, ...args) {
-  const id = ++__fezz_timeout_id;
-  const entry = { cancelled: false };
-  __fezz_timeouts.set(id, entry);
-  Deno.core.opAsync("fezz_sleep", timeout).then(() => {
-    if (entry.cancelled) {
-      return;
-    }
-    try {
-      handler(...args);
-    } catch (err) {
-      queueMicrotask(() => {
-        throw err;
-      });
-    }
-  });
-  return id;
-}
-
-function clearTimeout(id) {
-  const entry = __fezz_timeouts.get(id);
-  if (entry) {
-    entry.cancelled = true;
-    __fezz_timeouts.delete(id);
-  }
-}
-
-globalThis.setTimeout = setTimeout;
-globalThis.clearTimeout = clearTimeout;
-globalThis.Response = Response;
 globalThis.__fezz_normalize_response = __fezz_normalize_response;
 "#;
 
-#[op2(async)]
-async fn op_fezz_sleep(#[smi] timeout_ms: u64) {
-    tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-}
-
 fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
-    let extension = Extension::builder("fezz_timers")
-        .ops(vec![op_fezz_sleep::decl()])
-        .build();
-    let mut runtime = JsRuntime::new(RuntimeOptions {
-        module_loader: Some(Rc::new(FsModuleLoader)),
-        extensions: vec![extension],
-        ..Default::default()
-    });
-
-    runtime
-        .execute_script("<fezz-bootstrap>", BOOTSTRAP)
-        .context("Failed to execute JS bootstrap")?;
-
     let canonical_path = fs::canonicalize(script_path)
         .with_context(|| format!("Failed to canonicalize JS module path: {}", script_path))?;
     let module_specifier = ModuleSpecifier::from_file_path(&canonical_path).map_err(|_| {
@@ -177,6 +119,23 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
             canonical_path.display()
         )
     })?;
+
+    let permissions = PermissionsContainer::new(Permissions::allow_all());
+    let worker_options = WorkerOptions {
+        bootstrap: BootstrapOptions {
+            args: vec![],
+            ..Default::default()
+        },
+        module_loader: Rc::new(FsModuleLoader),
+        ..Default::default()
+    };
+    let mut worker =
+        MainWorker::bootstrap_from_options(module_specifier.clone(), permissions, worker_options);
+    let runtime = &mut worker.js_runtime;
+
+    runtime
+        .execute_script("<fezz-bootstrap>", BOOTSTRAP)
+        .context("Failed to execute JS bootstrap")?;
 
     let module_id = block_on(runtime.load_main_es_module(&module_specifier))
         .context("Failed to load JS module")?;
