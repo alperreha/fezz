@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 axum = "0.7"
 http-body-util = "0.1"
-hyper-util = "0.1.3"
+hyper-util = "0.1.19"
 libloading = "0.8"
 tokio = { version = "1", features = ["full"] }
 fezz-sdk = { path = "../fezz-sdk" }
