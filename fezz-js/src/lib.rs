@@ -133,7 +133,7 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
     let module_id = block_on(runtime.load_main_es_module(&module_specifier))
         .context("Failed to load JS module")?;
 
-    let mut evaluation = runtime.mod_evaluate(module_id);
+    let evaluation = runtime.mod_evaluate(module_id);
     block_on(async {
         runtime
             .run_event_loop(PollEventLoopOptions::default())
@@ -143,10 +143,10 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
     })
     .context("Failed to evaluate JS module")?;
 
-    let mut scope = runtime.handle_scope();
     let module_namespace = runtime
         .get_module_namespace(module_id)
         .context("Failed to get module namespace")?;
+    let mut scope = runtime.handle_scope();
     let module_namespace = v8::Local::new(&mut scope, module_namespace);
 
     let fetch_fn = resolve_fetch(&mut scope, module_namespace)?;
@@ -396,10 +396,8 @@ fn get_body<'a>(
     if value.is_object() {
         let body_obj = unsafe { v8::Local::<v8::Object>::cast(value) };
         let body_type = get_string_property(scope, body_obj, "type")?;
-        let body_value = body_obj.get(
-            scope,
-            v8::String::new(scope, "value").unwrap().into(),
-        );
+        let value_key = v8::String::new(scope, "value").unwrap();
+        let body_value = body_obj.get(scope, value_key.into());
 
         if let Some(body_type) = body_type {
             match body_type.as_str() {
