@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 deno_core = "0.272.0"
-tokio = { version = "1", features = ["sync", "rt"] }
+tokio = { version = "1", features = ["sync", "rt", "time"] }
