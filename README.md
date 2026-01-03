@@ -64,50 +64,32 @@ Artık her çağrı ayrı bir process içinde olsa bile (özellikle `fezz-runner
 ### 1. Build sample function and runner
 
 ```bash
-cargo build --release -p example_todosapi -p fezz-runner -p hhrf
+cargo build --release -p example_todosapi -p hhrf
 ```
 
 ### 2. Fonksiyon kütüphanesini functions klasörüne koy
 
 ```bash
-# todos@latest için fezz.json'daki isimle eşleşmeli
-mkdir -p ./functions/todos@latest
-cp target/release/libexample_todosapi.dylib ./functions/todos@latest/libexample_todosapi.dylib
+# org/func/version formatında dizin oluştur
+mkdir -p ./functions/acme/todos/0.0.1
+cp target/release/libexample_todosapi.dylib ./functions/acme/todos/0.0.1/fezz.so
 ```
 
-`functions/todos@latest/fezz.json` örneği (repo'da zaten var, sadece referans için):
-
-```json
-{
-  "id": "todos",
-  "version": "latest",
-  "entry": "libexample_todosapi.dylib",
-  "routes": [
-    {
-      "path": "/hello",
-      "method": "GET"
-    }
-  ]
-}
-```
-
-### 3. (Opsiyonel) Runner'ı override et
-
-Varsayılan olarak HHRF, `fezz-runner` binary'sini kullanır. Eğer kendi jailer'ını eklemek istiyorsan:
+İsterseniz `.env` dosyası da ekleyebilirsiniz:
 
 ```bash
-export FEZZ_RUNNER=fezz-runner   # veya kendi wrapper'ının path'i
+echo "EXAMPLE_VAR=demo" > ./functions/acme/todos/0.0.1/.env
 ```
 
-### 4. HHRF server'ını çalıştır
+### 3. HHRF server'ını çalıştır
 
 ```bash
 export HHRF_ROOT=.
 cargo run -p hhrf --release
 ```
 
-### 5. Fonksiyonu test et
+### 4. Fonksiyonu test et
 
 ```bash
-curl http://127.0.0.1:3000/rpc/todos@latest
+curl http://127.0.0.1:3000/rpc/acme/todos/0.0.1/hello
 ```
