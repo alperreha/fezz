@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use deno_core::{
     futures::executor::block_on,
+    op2,
     v8,
-    FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
+    Extension, FsModuleLoader, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions,
 };
-use std::{collections::HashMap, fs, path::Path, rc::Rc};
+use std::{collections::HashMap, fs, path::Path, rc::Rc, time::Duration};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -113,13 +114,54 @@ function normalizeBody(body) {
   return { type: "text", value: body ?? "" };
 }
 
+const __fezz_timeouts = new Map();
+let __fezz_timeout_id = 0;
+
+function setTimeout(handler, timeout = 0, ...args) {
+  const id = ++__fezz_timeout_id;
+  const entry = { cancelled: false };
+  __fezz_timeouts.set(id, entry);
+  Deno.core.opAsync("fezz_sleep", timeout).then(() => {
+    if (entry.cancelled) {
+      return;
+    }
+    try {
+      handler(...args);
+    } catch (err) {
+      queueMicrotask(() => {
+        throw err;
+      });
+    }
+  });
+  return id;
+}
+
+function clearTimeout(id) {
+  const entry = __fezz_timeouts.get(id);
+  if (entry) {
+    entry.cancelled = true;
+    __fezz_timeouts.delete(id);
+  }
+}
+
+globalThis.setTimeout = setTimeout;
+globalThis.clearTimeout = clearTimeout;
 globalThis.Response = Response;
 globalThis.__fezz_normalize_response = __fezz_normalize_response;
 "#;
 
+#[op2(async)]
+async fn op_fezz_sleep(#[smi] timeout_ms: u64) {
+    tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+}
+
 fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
+    let extension = Extension::builder("fezz_timers")
+        .ops(vec![op_fezz_sleep::decl()])
+        .build();
     let mut runtime = JsRuntime::new(RuntimeOptions {
         module_loader: Some(Rc::new(FsModuleLoader)),
+        extensions: vec![extension],
         ..Default::default()
     });
 
