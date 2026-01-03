@@ -1,5 +1,5 @@
 use fezz_macros::fezz_function;
-use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
+use fezz_sdk::{FezzWireHeader, FezzWireRequest, FezzWireResponse};
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -44,25 +44,19 @@ fn get_redis_connection() -> Result<redis::Connection, redis::RedisError> {
 }
 
 #[fezz_function]
-pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
-    let path = req.path.as_str();
+pub fn redis_demo(req: FezzWireRequest) -> FezzWireResponse {
+    let path = req.path_and_query.as_str();
     let method = req.method.as_str();
 
     match (method, path) {
         // POST /set - Write key-value to Redis
         ("POST", "/set") => {
-            let body = match &req.body {
-                Some(b) => b,
-                None => {
-                    return json_response(400, RedisResponse {
-                        success: false,
-                        message: "Body required".into(),
-                        data: None,
-                    });
-                }
+            let body = match request_body_to_string(&req) {
+                Ok(body) => body,
+                Err(resp) => return resp,
             };
 
-            let set_req: SetRequest = match serde_json::from_str(body) {
+            let set_req: SetRequest = match serde_json::from_str(&body) {
                 Ok(r) => r,
                 Err(e) => {
                     return json_response(400, RedisResponse {
@@ -101,7 +95,8 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
         // GET /get?key=xxx or POST /get with body {"key": "xxx"}
         ("GET", p) if p.starts_with("/get") => {
             // Get key from query string: /get?key=mykey
-            let key = p.split("key=")
+            let key = p
+                .split("key=")
                 .nth(1)
                 .map(|s| s.split('&').next().unwrap_or(s))
                 .unwrap_or("");
@@ -146,18 +141,12 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
 
         // POST /get - Get key from body
         ("POST", "/get") => {
-            let body = match &req.body {
-                Some(b) => b,
-                None => {
-                    return json_response(400, RedisResponse {
-                        success: false,
-                        message: "Body required".into(),
-                        data: None,
-                    });
-                }
+            let body = match request_body_to_string(&req) {
+                Ok(body) => body,
+                Err(resp) => return resp,
             };
 
-            let get_req: GetRequest = match serde_json::from_str(body) {
+            let get_req: GetRequest = match serde_json::from_str(&body) {
                 Ok(r) => r,
                 Err(e) => {
                     return json_response(400, RedisResponse {
@@ -200,18 +189,12 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
 
         // DELETE /del - Delete key
         ("DELETE", "/del") => {
-            let body = match &req.body {
-                Some(b) => b,
-                None => {
-                    return json_response(400, RedisResponse {
-                        success: false,
-                        message: "Body required".into(),
-                        data: None,
-                    });
-                }
+            let body = match request_body_to_string(&req) {
+                Ok(body) => body,
+                Err(resp) => return resp,
             };
 
-            let get_req: GetRequest = match serde_json::from_str(body) {
+            let get_req: GetRequest = match serde_json::from_str(&body) {
                 Ok(r) => r,
                 Err(e) => {
                     return json_response(400, RedisResponse {
@@ -261,10 +244,30 @@ pub fn redis_demo(req: FezzHttpRequest) -> FezzHttpResponse {
     }
 }
 
-fn json_response(status: u16, body: RedisResponse) -> FezzHttpResponse {
-    FezzHttpResponse {
-        status,
-        headers: vec![("content-type".into(), "application/json".into())],
-        body: Some(serde_json::to_string(&body).unwrap()),
+fn request_body_to_string(req: &FezzWireRequest) -> Result<String, FezzWireResponse> {
+    if req.body.is_empty() {
+        return Err(json_response(400, RedisResponse {
+            success: false,
+            message: "Body required".into(),
+            data: None,
+        }));
     }
+
+    String::from_utf8(req.body.to_vec()).map_err(|e| {
+        json_response(400, RedisResponse {
+            success: false,
+            message: format!("Invalid UTF-8 body: {}", e),
+            data: None,
+        })
+    })
+}
+
+fn json_response(status: u16, body: RedisResponse) -> FezzWireResponse {
+    let body = serde_json::to_vec(&body)
+        .unwrap_or_else(|_| b"{\"success\":false,\"message\":\"Serialization failed\",\"data\":null}".to_vec());
+    FezzWireResponse::new(
+        status,
+        vec![FezzWireHeader::new("content-type", "application/json")],
+        body,
+    )
 }

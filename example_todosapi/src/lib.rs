@@ -1,9 +1,9 @@
 use fezz_macros::fezz_function;
-use fezz_sdk::{FezzHttpRequest, FezzHttpResponse};
+use fezz_sdk::{FezzWireHeader, FezzWireRequest, FezzWireResponse};
 
 // Basit demo: req içeriğini çok umursamıyoruz, hep /todos çağıracağız
 #[fezz_function]
-pub fn proxy_todos(_req: FezzHttpRequest) -> FezzHttpResponse {
+pub fn proxy_todos(_req: FezzWireRequest) -> FezzWireResponse {
     let client = reqwest::blocking::Client::new();
     let res = client
         .get("https://jsonplaceholder.typicode.com/todos/1")
@@ -11,11 +11,11 @@ pub fn proxy_todos(_req: FezzHttpRequest) -> FezzHttpResponse {
         .unwrap();
 
     let status = res.status().as_u16();
-    let body = res.text().unwrap();
+    let body = res.bytes().unwrap_or_default().to_vec();
 
-    FezzHttpResponse {
+    FezzWireResponse::new(
         status,
-        headers: vec![("content-type".into(), "application/json".into())],
-        body: Some(body),
-    }
+        vec![FezzWireHeader::new("content-type", "application/json")],
+        body,
+    )
 }
