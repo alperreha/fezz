@@ -1,33 +1,18 @@
 use axum::{
     extract::Path,
     http::{HeaderName, HeaderValue, Request},
-    routing::get,
+    routing::any,
     Router,
 };
 use fezz_sdk::{ByteBuf, FezzWireHeader, FezzWireRequest, FezzWireResponse};
 use http_body_util::BodyExt;
 use libloading::{Library, Symbol};
-use serde::Deserialize;
 use std::{
     path::Path as FsPath,
     sync::Arc,
     time::Instant,
 };
 use tokio::net::TcpListener;
-
-#[derive(Deserialize)]
-struct FezzManifest {
-    id: String,
-    version: String,
-    entry: String,
-    routes: Vec<FezzRoute>,
-}
-
-#[derive(Deserialize)]
-struct FezzRoute {
-    path: String,
-    method: String,
-}
 
 #[tokio::main]
 async fn main() {
@@ -36,11 +21,12 @@ async fn main() {
     let shared_root = Arc::new(root);
 
     let app = Router::new().route(
-        "/rpc/:id",
-        get({
+        "/rpc/:org/:func/:version/*tail",
+        any({
             let root = shared_root.clone();
-            move |Path(id): Path<String>, req: Request<axum::body::Body>| {
-                handle_rpc(root.clone(), id, req)
+            move |Path((org, func, version, _tail)): Path<(String, String, String, String)>,
+                  req: Request<axum::body::Body>| {
+                handle_rpc(root.clone(), org, func, version, req)
             }
         }),
     );
@@ -51,7 +37,9 @@ async fn main() {
 
 async fn handle_rpc(
     root: Arc<String>,
-    id: String,
+    org: String,
+    func: String,
+    version: String,
     req: Request<axum::body::Body>,
 ) -> axum::response::Response {
     let start_time = Instant::now();
@@ -64,35 +52,30 @@ async fn handle_rpc(
         }
     };
 
-    // 1) Read fezz.json manifest
-    let manifest_path = format!("{root}/functions/{id}/fezz.json");
-    println!("[HHRF] Loading manifest: {}", manifest_path);
-    let manifest_str = match std::fs::read_to_string(&manifest_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return error_response(404, format!("Manifest not found: {}", e));
-        }
-    };
-    let manifest: FezzManifest = match serde_json::from_str(&manifest_str) {
-        Ok(m) => m,
-        Err(e) => {
-            return error_response(400, format!("Invalid manifest: {}", e));
-        }
-    };
-    println!(
-        "[HHRF] Manifest loaded: id={}, version={}, entry={}",
-        manifest.id, manifest.version, manifest.entry
-    );
-    let manifest_load_time = start_time.elapsed();
-    println!("[HHRF] Manifest load time: {:?}", manifest_load_time);
-
-    let so_path = format!("{root}/functions/{id}/{}", manifest.entry);
-
-    let path_and_query = parts
+    let prefix = format!("/rpc/{org}/{func}/{version}");
+    let mut stripped_path = parts
         .uri
-        .path_and_query()
-        .map(|pq| pq.as_str().to_string())
-        .unwrap_or_else(|| parts.uri.path().to_string());
+        .path()
+        .strip_prefix(&prefix)
+        .unwrap_or(parts.uri.path())
+        .to_string();
+    if stripped_path.is_empty() {
+        stripped_path = "/".to_string();
+    }
+    if !stripped_path.starts_with('/') {
+        stripped_path = format!("/{stripped_path}");
+    }
+    let path_and_query = if let Some(query) = parts.uri.query() {
+        format!("{stripped_path}?{query}")
+    } else {
+        stripped_path
+    };
+
+    let function_root = format!("{root}/functions/{org}/{func}/{version}");
+    let so_path = format!("{function_root}/fezz.so");
+    let env_path = format!("{function_root}/.env");
+
+    let env_vars = load_env_vars(&env_path);
 
     let headers = parts
         .headers
@@ -128,9 +111,9 @@ async fn handle_rpc(
         }
     };
 
-    // 3) Execute function in an external process via fezz-runner
+    // 3) Execute function in-process via libloading
     let fetch_start = Instant::now();
-    let resp_bytes = match execute_in_process(&so_path, &req_bytes).await {
+    let resp_bytes = match execute_in_process(&so_path, &req_bytes, env_vars).await {
         Ok(bytes) => bytes,
         Err(e) => {
             return error_response(500, format!("Function execution error: {}", e));
@@ -180,7 +163,11 @@ async fn handle_rpc(
 ///
 /// `so_path` is the path to the dynamic library containing `fezz_handle_v2`.
 /// `req_bytes` is the FezzWireRequest bytes passed to the plugin.
-async fn execute_in_process(so_path: &str, req_bytes: &[u8]) -> Result<Vec<u8>, String> {
+async fn execute_in_process(
+    so_path: &str,
+    req_bytes: &[u8],
+    env_vars: Vec<(String, String)>,
+) -> Result<Vec<u8>, String> {
     if !FsPath::new(so_path).exists() {
         return Err(format!("Library not found at {}", so_path));
     }
@@ -191,6 +178,10 @@ async fn execute_in_process(so_path: &str, req_bytes: &[u8]) -> Result<Vec<u8>, 
     tokio::task::spawn_blocking(move || unsafe {
         type FezzHandleV2Fn = unsafe extern "C" fn(fezz_sdk::FezzSlice) -> fezz_sdk::FezzOwned;
         type FezzFreeV2Fn = unsafe extern "C" fn(fezz_sdk::FezzOwned);
+
+        for (key, value) in env_vars {
+            std::env::set_var(key, value);
+        }
 
         let library = Library::new(&so_path)
             .map_err(|e| format!("Failed to load library '{}': {}", so_path, e))?;
@@ -234,4 +225,32 @@ fn error_response(status: u16, message: String) -> axum::response::Response {
         .header("content-type", "text/plain")
         .body(axum::body::Body::from(message))
         .unwrap()
+}
+
+fn load_env_vars(env_path: &str) -> Vec<(String, String)> {
+    let contents = match std::fs::read_to_string(env_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            println!("[HHRF] Failed to read env file '{}': {}", env_path, err);
+            return Vec::new();
+        }
+    };
+
+    contents
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
 }
