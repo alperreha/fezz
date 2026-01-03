@@ -170,8 +170,56 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         )
         .ok_or_else(|| anyhow!("JS fetch handler threw an exception"))?;
 
+    if result.is_promise() {
+        let promise = unsafe { v8::Local::<v8::Promise>::cast(result) };
+        let promise = v8::Global::new(&mut scope, promise);
+        drop(scope);
+        let resolved = resolve_promise(&mut runtime, promise)?;
+        let mut scope = runtime.handle_scope();
+        let resolved_value = v8::Local::new(&mut scope, &resolved);
+        let normalized = normalize_response(&mut scope, resolved_value)?;
+        return extract_response(&mut scope, normalized);
+    }
+
     let normalized = normalize_response(&mut scope, result)?;
     extract_response(&mut scope, normalized)
+}
+
+fn resolve_promise(
+    runtime: &mut JsRuntime,
+    promise: v8::Global<v8::Promise>,
+) -> Result<v8::Global<v8::Value>> {
+    loop {
+        block_on(runtime.run_event_loop(PollEventLoopOptions::default()))
+            .context("Failed to run JS event loop")?;
+        let mut scope = runtime.handle_scope();
+        let promise = v8::Local::new(&mut scope, &promise);
+        match promise.state() {
+            v8::PromiseState::Pending => continue,
+            v8::PromiseState::Fulfilled => {
+                let value = promise.result(&mut scope);
+                return Ok(v8::Global::new(&mut scope, value));
+            }
+            v8::PromiseState::Rejected => {
+                let reason = promise.result(&mut scope);
+                let reason = format_js_error(&mut scope, reason);
+                return Err(anyhow!("JS fetch promise rejected: {}", reason));
+            }
+        }
+    }
+}
+
+fn format_js_error<'a>(
+    scope: &mut v8::HandleScope<'a>,
+    value: v8::Local<'a, v8::Value>,
+) -> String {
+    if let Some(string) = value.to_string(scope) {
+        return string.to_rust_string_lossy(scope);
+    }
+    if let Some(json) = v8::json::stringify(scope, value) {
+        return json.to_rust_string_lossy(scope);
+    }
+    "<non-string rejection>".to_string()
 }
 
 fn resolve_fetch<'a>(
