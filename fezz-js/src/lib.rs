@@ -154,6 +154,7 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         .get_module_namespace(module_id)
         .context("Failed to get module namespace")?;
     let mut scope = runtime.handle_scope();
+    let mut scope = scope.enter();
     let module_namespace = v8::Local::new(&mut scope, module_namespace);
 
     let fetch_fn = resolve_fetch(&mut scope, module_namespace)?;
@@ -172,11 +173,12 @@ fn run_js(script_path: &str, req: JsInvoke) -> Result<JsResult> {
         .ok_or_else(|| anyhow!("JS fetch handler threw an exception"))?;
 
     if result.is_promise() {
-        let promise = unsafe { v8::Local::<v8::Promise>::cast(result) };
+        let promise: v8::Local<v8::Promise> = unsafe { result.cast() };
         let promise = v8::Global::new(&mut scope, promise);
         drop(scope);
         let resolved = resolve_promise(&mut runtime, promise)?;
         let mut scope = runtime.handle_scope();
+        let mut scope = scope.enter();
         let resolved_value = v8::Local::new(&mut scope, &resolved);
         let normalized = normalize_response(&mut scope, resolved_value)?;
         return extract_response(&mut scope, normalized);
@@ -194,6 +196,7 @@ fn resolve_promise(
         block_on(runtime.run_event_loop(PollEventLoopOptions::default()))
             .context("Failed to run JS event loop")?;
         let mut scope = runtime.handle_scope();
+        let mut scope = scope.enter();
         let promise = v8::Local::new(&mut scope, &promise);
         match promise.state() {
             v8::PromiseState::Pending => continue,
@@ -211,26 +214,27 @@ fn resolve_promise(
 }
 
 fn format_js_error<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     value: v8::Local<'a, v8::Value>,
 ) -> String {
     if let Some(string) = value.to_string(scope) {
-        return string.to_rust_string_lossy(scope);
+        return string.to_rust_string_lossy(scope.get_isolate());
     }
     if let Some(json) = v8::json::stringify(scope, value) {
-        return json.to_rust_string_lossy(scope);
+        return json.to_rust_string_lossy(scope.get_isolate());
     }
     "<non-string rejection>".to_string()
 }
 
 fn resolve_fetch<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     module_namespace: v8::Local<'a, v8::Object>,
 ) -> Result<v8::Local<'a, v8::Function>> {
     let fetch_key = v8::String::new(scope, "fetch").unwrap();
     if let Some(fetch_value) = module_namespace.get(scope, fetch_key.into()) {
         if fetch_value.is_function() {
-            return Ok(unsafe { v8::Local::<v8::Function>::cast(fetch_value) });
+            let fetch_fn: v8::Local<v8::Function> = unsafe { fetch_value.cast() };
+            return Ok(fetch_fn);
         }
     }
 
@@ -243,7 +247,7 @@ fn resolve_fetch<'a>(
         return Err(anyhow!("Default export is not an object"));
     }
 
-    let default_obj = unsafe { v8::Local::<v8::Object>::cast(default_value) };
+    let default_obj: v8::Local<v8::Object> = unsafe { default_value.cast() };
     let fetch_value = default_obj
         .get(scope, fetch_key.into())
         .ok_or_else(|| anyhow!("Default export missing fetch handler"))?;
@@ -252,11 +256,12 @@ fn resolve_fetch<'a>(
         return Err(anyhow!("Default export fetch is not a function"));
     }
 
-    Ok(unsafe { v8::Local::<v8::Function>::cast(fetch_value) })
+    let fetch_fn: v8::Local<v8::Function> = unsafe { fetch_value.cast() };
+    Ok(fetch_fn)
 }
 
 fn build_request<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     req: &JsInvoke,
 ) -> Result<v8::Local<'a, v8::Object>> {
     let obj = v8::Object::new(scope);
@@ -281,7 +286,7 @@ fn build_request<'a>(
 }
 
 fn build_headers<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     headers: &[(String, String)],
 ) -> Result<v8::Local<'a, v8::Array>> {
     let array = v8::Array::new(scope, headers.len() as i32);
@@ -300,7 +305,7 @@ fn build_headers<'a>(
 }
 
 fn build_env<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     env: &[(String, String)],
 ) -> Result<v8::Local<'a, v8::Object>> {
     let obj = v8::Object::new(scope);
@@ -313,7 +318,7 @@ fn build_env<'a>(
 }
 
 fn build_body<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     body: &[u8],
 ) -> Result<v8::Local<'a, v8::Value>> {
     if body.is_empty() {
@@ -330,10 +335,10 @@ fn build_body<'a>(
 }
 
 fn normalize_response<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     value: v8::Local<'a, v8::Value>,
 ) -> Result<v8::Local<'a, v8::Object>> {
-    let global = scope.get_current_context().global(scope);
+    let global = scope.with_current_context().global(scope);
     let normalizer_key = v8::String::new(scope, "__fezz_normalize_response").unwrap();
     let normalizer_value = global
         .get(scope, normalizer_key.into())
@@ -341,7 +346,7 @@ fn normalize_response<'a>(
     if !normalizer_value.is_function() {
         return Err(anyhow!("Response normalizer is not callable"));
     }
-    let normalizer_fn = unsafe { v8::Local::<v8::Function>::cast(normalizer_value) };
+    let normalizer_fn: v8::Local<v8::Function> = unsafe { normalizer_value.cast() };
     let normalized = normalizer_fn
         .call(scope, global.into(), &[value])
         .ok_or_else(|| anyhow!("Failed to normalize response"))?;
@@ -350,11 +355,12 @@ fn normalize_response<'a>(
         return Err(anyhow!("Normalized response is not an object"));
     }
 
-    Ok(unsafe { v8::Local::<v8::Object>::cast(normalized) })
+    let normalized_obj: v8::Local<v8::Object> = unsafe { normalized.cast() };
+    Ok(normalized_obj)
 }
 
 fn extract_response<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     response: v8::Local<'a, v8::Object>,
 ) -> Result<JsResult> {
     let status = get_u16_property(scope, response, "status")?.unwrap_or(200);
@@ -369,7 +375,7 @@ fn extract_response<'a>(
 }
 
 fn get_u16_property<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     obj: v8::Local<'a, v8::Object>,
     key: &str,
 ) -> Result<Option<u16>> {
@@ -386,7 +392,7 @@ fn get_u16_property<'a>(
 }
 
 fn get_headers<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     obj: v8::Local<'a, v8::Object>,
 ) -> Result<Vec<(String, String)>> {
     let key_value = v8::String::new(scope, "headers").unwrap();
@@ -398,7 +404,7 @@ fn get_headers<'a>(
         return Ok(Vec::new());
     }
 
-    let array = unsafe { v8::Local::<v8::Array>::cast(value) };
+    let array: v8::Local<v8::Array> = unsafe { value.cast() };
     let mut headers = Vec::new();
     for idx in 0..array.length() {
         let entry_index = v8::Integer::new(scope, idx as i32);
@@ -408,17 +414,17 @@ fn get_headers<'a>(
         if !entry.is_array() {
             continue;
         }
-        let entry_array = unsafe { v8::Local::<v8::Array>::cast(entry) };
+        let entry_array: v8::Local<v8::Array> = unsafe { entry.cast() };
         let key_index = v8::Integer::new(scope, 0);
         let name = entry_array
             .get(scope, key_index.into())
             .and_then(|val| val.to_string(scope))
-            .map(|s| s.to_rust_string_lossy(scope));
+            .map(|s| s.to_rust_string_lossy(scope.get_isolate()));
         let value_index = v8::Integer::new(scope, 1);
         let value = entry_array
             .get(scope, value_index.into())
             .and_then(|val| val.to_string(scope))
-            .map(|s| s.to_rust_string_lossy(scope));
+            .map(|s| s.to_rust_string_lossy(scope.get_isolate()));
         if let (Some(name), Some(value)) = (name, value) {
             headers.push((name, value));
         }
@@ -428,7 +434,7 @@ fn get_headers<'a>(
 }
 
 fn get_body<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     obj: v8::Local<'a, v8::Object>,
 ) -> Result<Vec<u8>> {
     let key_value = v8::String::new(scope, "body").unwrap();
@@ -445,11 +451,11 @@ fn get_body<'a>(
         let string = value
             .to_string(scope)
             .ok_or_else(|| anyhow!("Failed to read response body string"))?;
-        return Ok(string.to_rust_string_lossy(scope).into_bytes());
+        return Ok(string.to_rust_string_lossy(scope.get_isolate()).into_bytes());
     }
 
     if value.is_object() {
-        let body_obj = unsafe { v8::Local::<v8::Object>::cast(value) };
+        let body_obj: v8::Local<v8::Object> = unsafe { value.cast() };
         let body_type = get_string_property(scope, body_obj, "type")?;
         let value_key = v8::String::new(scope, "value").unwrap();
         let body_value = body_obj.get(scope, value_key.into());
@@ -459,7 +465,7 @@ fn get_body<'a>(
                 "bytes" => {
                     if let Some(body_value) = body_value {
                         if body_value.is_array() {
-                            let array = unsafe { v8::Local::<v8::Array>::cast(body_value) };
+                            let array: v8::Local<v8::Array> = unsafe { body_value.cast() };
                             let mut bytes = Vec::with_capacity(array.length() as usize);
                             for idx in 0..array.length() {
                                 let entry_index = v8::Integer::new(scope, idx as i32);
@@ -480,10 +486,10 @@ fn get_body<'a>(
                             let string = body_value
                                 .to_string(scope)
                                 .ok_or_else(|| anyhow!("Failed to read response body string"))?;
-                            return Ok(string.to_rust_string_lossy(scope).into_bytes());
+                            return Ok(string.to_rust_string_lossy(scope.get_isolate()).into_bytes());
                         }
                         if let Some(json) = v8::json::stringify(scope, body_value) {
-                            return Ok(json.to_rust_string_lossy(scope).into_bytes());
+                            return Ok(json.to_rust_string_lossy(scope.get_isolate()).into_bytes());
                         }
                     }
                 }
@@ -492,7 +498,7 @@ fn get_body<'a>(
         }
 
         if let Some(json) = v8::json::stringify(scope, value) {
-            return Ok(json.to_rust_string_lossy(scope).into_bytes());
+            return Ok(json.to_rust_string_lossy(scope.get_isolate()).into_bytes());
         }
     }
 
@@ -500,7 +506,7 @@ fn get_body<'a>(
 }
 
 fn get_string_property<'a>(
-    scope: &mut v8::HandleScope<'a>,
+    scope: &mut v8::PinScope<'a, '_>,
     obj: v8::Local<'a, v8::Object>,
     key: &str,
 ) -> Result<Option<String>> {
@@ -513,7 +519,7 @@ fn get_string_property<'a>(
         let value = value
             .to_string(scope)
             .ok_or_else(|| anyhow!("Failed to read string property"))?;
-        return Ok(Some(value.to_rust_string_lossy(scope)));
+        return Ok(Some(value.to_rust_string_lossy(scope.get_isolate())));
     }
     Ok(None)
 }
